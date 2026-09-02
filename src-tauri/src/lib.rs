@@ -1,0 +1,87 @@
+mod app_state;
+mod application;
+mod auth;
+mod backends;
+mod commands;
+mod domain;
+mod errors;
+mod mime;
+mod providers;
+mod storage;
+mod sync;
+
+use std::error::Error;
+use std::fs;
+
+use tauri::Manager;
+
+pub fn run() {
+    let result = tauri::Builder::default()
+        .setup(|app| {
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| Box::new(error) as Box<dyn Error>)?;
+            fs::create_dir_all(&data_dir)?;
+            let database_path = data_dir.join("mutsumi-mail.sqlite3");
+            let state = app_state::AppState::open(&database_path)
+                .map_err(|error| Box::new(error) as Box<dyn Error>)?;
+            app.manage(state);
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_target(false)
+                .try_init()
+                .ok();
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::get_provider_presets,
+            commands::detect_provider,
+            commands::list_accounts,
+            commands::create_account,
+            commands::test_incoming_connection,
+            commands::test_outgoing_connection,
+            commands::remove_account,
+            commands::list_mailboxes,
+            commands::list_messages,
+            commands::search_messages,
+            commands::get_message,
+            commands::fetch_message_body,
+            commands::mutate_message,
+            commands::mark_read,
+            commands::set_starred,
+            commands::save_draft,
+            commands::send_draft,
+            commands::list_outbox,
+            commands::start_sync,
+            commands::cancel_sync,
+            commands::get_sync_status,
+            commands::sync_all,
+            commands::update_account,
+            commands::get_account_status,
+            commands::reconnect_account,
+            commands::refresh_mailboxes,
+            commands::set_mailbox_sync_policy,
+            commands::move_messages,
+            commands::delete_messages,
+            commands::list_thread,
+            commands::load_draft,
+            commands::delete_draft,
+            commands::retry_outbox_item,
+            commands::cancel_outbox_item,
+            commands::download_attachment,
+            commands::cancel_attachment_download,
+            commands::save_attachment_as,
+            commands::open_attachment,
+            commands::reveal_attachment,
+            commands::get_search_suggestions,
+            commands::get_settings,
+            commands::update_settings,
+            commands::clear_cache,
+            commands::export_diagnostics
+        ])
+        .run(tauri::generate_context!());
+    if let Err(error) = result {
+        eprintln!("Mutsumi Mail failed to start: {error}");
+    }
+}
