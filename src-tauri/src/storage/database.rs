@@ -1728,6 +1728,67 @@ impl Database {
         self.get_message_in_mailbox(message_id, mailbox_id)
     }
 
+    /// Applies one flag mutation to every selected message in a single local
+    /// transaction. Each successful local change is queued as a durable IMAP
+    /// operation, so the selection can be updated offline and is later pushed
+    /// to the server by the normal sync pipeline.
+    pub fn mutate_messages(
+        &mut self,
+        message_refs: &[(String, String)],
+        is_read: Option<bool>,
+        is_starred: Option<bool>,
+    ) -> Result<usize, AppError> {
+        if is_read.is_none() && is_starred.is_none() {
+            return Err(AppError::InvalidConfiguration(
+                "批量状态更新至少需要一个字段".into(),
+            ));
+        }
+
+        let tx = self.connection.transaction().map_err(AppError::from)?;
+        let now = Utc::now().to_rfc3339();
+        let mut mutated = 0;
+        let mut seen = HashSet::new();
+
+        for (message_id, mailbox_id) in message_refs {
+            // A selection is normally unique in the UI. De-duplicate anyway
+            // so malformed callers cannot queue the same remote mutation more
+            // than once in this transaction.
+            if !seen.insert((message_id.as_str(), mailbox_id.as_str())) {
+                continue;
+            }
+
+            let instance: Option<(String, String, String)> = tx
+                .query_row(
+                    "SELECT mi.id,m.account_id,mi.flags_json FROM message_instances mi JOIN messages m ON m.id=mi.message_id JOIN mailboxes mailbox ON mailbox.id=mi.mailbox_id AND mailbox.account_id=m.account_id AND mailbox.selectable=1 WHERE mi.message_id=? AND mi.mailbox_id=? AND mi.is_deleted=0",
+                    params![message_id, mailbox_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(AppError::from)?;
+            let (instance_id, account_id, flags_json) =
+                instance.ok_or_else(|| AppError::not_found("message instance"))?;
+            let mut flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+            update_flag(&mut flags, "\\Seen", is_read);
+            update_flag(&mut flags, "\\Flagged", is_starred);
+            let next_flags_json = serde_json::to_string(&flags).map_err(AppError::from)?;
+
+            tx.execute(
+                "UPDATE message_instances SET flags_json=?,last_synced_at=? WHERE id=?",
+                params![next_flags_json, now, instance_id],
+            )
+            .map_err(AppError::from)?;
+            tx.execute(
+                "INSERT INTO pending_operations (id,account_id,mailbox_id,message_instance_id,operation_type,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
+                params![Uuid::new_v4().to_string(), account_id, mailbox_id, instance_id, "set_flags", json!({ "is_read": is_read, "is_starred": is_starred }).to_string(), now, now],
+            )
+            .map_err(AppError::from)?;
+            mutated += 1;
+        }
+
+        tx.commit().map_err(AppError::from)?;
+        Ok(mutated)
+    }
+
     pub fn move_messages(
         &mut self,
         message_refs: &[(String, String)],
@@ -3847,6 +3908,134 @@ mod tests {
                 .id,
             "owner-message"
         );
+    }
+
+    #[test]
+    fn batch_mutation_updates_every_selected_instance_or_rolls_back_as_one_unit() {
+        let mut database = Database::open_in_memory().expect("migration");
+        let preset = provider_presets()
+            .into_iter()
+            .find(|item| item.id == "qq")
+            .expect("preset");
+        let account = database
+            .create_account(
+                &CreateAccountInput {
+                    email: "batch@qq.com".into(),
+                    display_name: "Batch".into(),
+                    provider_id: "qq".into(),
+                    secret: "not persisted".into(),
+                    incoming_secret: None,
+                    outgoing_secret: None,
+                    incoming: None,
+                    outgoing: None,
+                },
+                &preset,
+                "account/batch/incoming",
+                "account/batch/outgoing",
+                true,
+                true,
+            )
+            .expect("account");
+        let mailbox = database
+            .upsert_remote_mailboxes(
+                &account.id,
+                &[SyncedMailboxInput {
+                    remote_id: "INBOX".into(),
+                    display_name: "Inbox".into(),
+                    delimiter: Some("/".into()),
+                    special_role: Some("inbox".into()),
+                    selectable: true,
+                }],
+            )
+            .expect("mailbox")
+            .remove(0);
+        database
+            .apply_imap_snapshot(
+                &account.id,
+                "INBOX",
+                snapshot_metadata(Some(9), 2, 2, true),
+                &[
+                    SyncedMessageInput {
+                        uid: 1,
+                        flags: Vec::new(),
+                        received_at: Some("2026-09-03T00:00:00Z".into()),
+                        size_bytes: None,
+                        rfc_message_id: Some("<batch-one@example.com>".into()),
+                        subject: "Batch one".into(),
+                        preview: String::new(),
+                        body_text: None,
+                        body_html_text: None,
+                        has_attachment: false,
+                        from: None,
+                        to: Vec::new(),
+                    },
+                    SyncedMessageInput {
+                        uid: 2,
+                        flags: Vec::new(),
+                        received_at: Some("2026-09-03T00:01:00Z".into()),
+                        size_bytes: None,
+                        rfc_message_id: Some("<batch-two@example.com>".into()),
+                        subject: "Batch two".into(),
+                        preview: String::new(),
+                        body_text: None,
+                        body_html_text: None,
+                        has_attachment: false,
+                        from: None,
+                        to: Vec::new(),
+                    },
+                ],
+            )
+            .expect("snapshot");
+        let messages = database
+            .list_messages(Some(&mailbox.id), 10)
+            .expect("messages");
+        let refs = messages
+            .iter()
+            .map(|message| (message.id.clone(), mailbox.id.clone()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            database
+                .mutate_messages(&refs, Some(true), None)
+                .expect("batch mark read"),
+            2
+        );
+        assert!(database
+            .list_messages(Some(&mailbox.id), 10)
+            .expect("marked messages")
+            .iter()
+            .all(|message| message.is_read));
+        let pending_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT count(*) FROM pending_operations WHERE operation_type='set_flags'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pending operations");
+        assert_eq!(pending_count, 2);
+
+        let missing = vec![
+            refs[0].clone(),
+            (String::from("missing-message"), mailbox.id.clone()),
+        ];
+        assert!(database
+            .mutate_messages(&missing, Some(false), None)
+            .is_err());
+        assert!(database
+            .list_messages(Some(&mailbox.id), 10)
+            .expect("rolled back messages")
+            .iter()
+            .all(|message| message.is_read));
+        let pending_count_after_error: i64 = database
+            .connection
+            .query_row(
+                "SELECT count(*) FROM pending_operations WHERE operation_type='set_flags'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("pending operations after rollback");
+        assert_eq!(pending_count_after_error, 2);
     }
 
     #[test]

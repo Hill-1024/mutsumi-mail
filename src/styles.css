@@ -91,7 +91,9 @@
   /* ------------------------------------------------------------------------
      TYPOGRAPHY
      ------------------------------------------------------------------------ */
-  --md-sys-typescale-font: Roboto, "Roboto Flex", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
+  --md-sys-typescale-font:
+    Roboto, 'Roboto Flex', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui,
+    sans-serif;
 
   /* Backward compatible variable mappings */
   --bg: var(--md-sys-color-background);
@@ -190,11 +192,15 @@
 /* ==========================================================================
    GLOBAL RESET & BASE STYLES
    ========================================================================== */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
-html, body, #root {
+html,
+body,
+#root {
   height: 100%;
   margin: 0;
   padding: 0;
@@ -208,7 +214,9 @@ body {
   user-select: none;
 }
 
-button, input, textarea {
+button,
+input,
+textarea {
   font-family: inherit;
 }
 
@@ -231,7 +239,9 @@ button {
   letter-spacing: 0.1px;
 }
 
-button:focus-visible, input:focus-visible, textarea:focus-visible {
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--md-sys-color-primary);
   outline-offset: 2px;
 }
@@ -474,13 +484,19 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.1px;
-  transition: box-shadow var(--md-sys-motion-duration-short) ease, transform var(--md-sys-motion-duration-short) ease;
+  transition:
+    box-shadow var(--md-sys-motion-duration-short) ease,
+    transform var(--md-sys-motion-duration-short) ease;
 }
 
 .compose-button:hover {
   box-shadow: var(--md-sys-elevation-4);
   transform: translateY(-1px);
-  background: color-mix(in srgb, var(--md-sys-color-primary-container) 92%, var(--md-sys-color-on-primary-container) 8%);
+  background: color-mix(
+    in srgb,
+    var(--md-sys-color-primary-container) 92%,
+    var(--md-sys-color-on-primary-container) 8%
+  );
 }
 
 .compose-button:active {
@@ -503,7 +519,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 /* MD3 Navigation List Items (Active Pill) */
-.primary-nav, .folder-nav {
+.primary-nav,
+.folder-nav {
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -524,7 +541,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   text-decoration: none;
   font-size: 14px;
   font-weight: 500;
-  transition: background var(--md-sys-motion-duration-short) ease, color var(--md-sys-motion-duration-short) ease;
+  transition:
+    background var(--md-sys-motion-duration-short) ease,
+    color var(--md-sys-motion-duration-short) ease;
 }
 
 .nav-item:hover {
@@ -532,7 +551,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   color: var(--md-sys-color-on-surface);
 }
 
-.nav-item.is-active, .nav-item[aria-current='page'] {
+.nav-item.is-active,
+.nav-item[aria-current='page'] {
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
   font-weight: 600;
@@ -688,7 +708,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   border-radius: var(--md-sys-shape-corner-full);
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
-  transition: background var(--md-sys-motion-duration-short) ease, color var(--md-sys-motion-duration-short) ease;
+  transition:
+    background var(--md-sys-motion-duration-short) ease,
+    color var(--md-sys-motion-duration-short) ease;
 }
 
 .icon-button:hover {
@@ -779,6 +801,34 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
+}
+
+.list-selection-summary {
+  align-items: center;
+  gap: 4px;
+}
+
+.selection-count {
+  overflow: hidden;
+  color: var(--md-sys-color-on-surface);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-select-all {
+  flex: 0 0 auto;
+}
+
+.list-bulk-mode-trigger {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 12px;
+  white-space: nowrap;
 }
 
 .muted-count {
@@ -794,7 +844,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .list-toolbar-actions {
   display: flex;
+  flex: 0 0 auto;
   gap: 4px;
+}
+
+.bulk-delete {
+  color: var(--md-sys-color-error);
+}
+
+.bulk-delete:hover {
+  background: color-mix(in srgb, var(--md-sys-color-error) 12%, transparent);
+  color: var(--md-sys-color-error);
 }
 
 /* MD3 Search Bar Container */
@@ -809,7 +869,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
-  transition: box-shadow var(--md-sys-motion-duration-short) ease, background var(--md-sys-motion-duration-short) ease;
+  transition:
+    box-shadow var(--md-sys-motion-duration-short) ease,
+    background var(--md-sys-motion-duration-short) ease;
 }
 
 .search-bar:hover {
@@ -871,6 +933,46 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: var(--md-sys-color-secondary-container);
 }
 
+.message-row.is-multi-selected {
+  background: var(--md-sys-color-secondary-container);
+}
+
+.message-select-control {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  margin-top: 5px;
+  padding: 0;
+  border: 2px solid var(--md-sys-color-outline);
+  border-radius: var(--md-sys-shape-corner-extra-small);
+  background: var(--md-sys-color-surface);
+  color: transparent;
+  cursor: pointer;
+  transition:
+    background var(--md-sys-motion-duration-short) ease,
+    border-color var(--md-sys-motion-duration-short) ease,
+    color var(--md-sys-motion-duration-short) ease;
+}
+
+.message-select-control:hover,
+.message-select-control:focus-visible {
+  border-color: var(--md-sys-color-primary);
+  outline: none;
+}
+
+.message-select-control.is-checked {
+  border-color: var(--md-sys-color-primary);
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+
+.message-row:hover .message-select-control:not(.is-checked),
+.message-select-control.selection-active:not(.is-checked) {
+  border-color: var(--md-sys-color-on-surface-variant);
+}
+
 .row-avatar {
   display: grid;
   place-items: center;
@@ -886,6 +988,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 .message-row.is-selected .row-avatar {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+
+.message-row.is-multi-selected .row-avatar {
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
 }
@@ -1031,7 +1138,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 @keyframes m3-spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ==========================================================================
@@ -1196,7 +1305,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .reader-body-status.is-error {
   justify-content: space-between;
-  background: color-mix(in srgb, var(--md-sys-color-error) 10%, var(--md-sys-color-surface-container));
+  background: color-mix(
+    in srgb,
+    var(--md-sys-color-error) 10%,
+    var(--md-sys-color-surface-container)
+  );
   color: var(--md-sys-color-error);
 }
 
@@ -1385,7 +1498,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 .large-search:focus-within {
-  box-shadow: 0 0 0 2px var(--md-sys-color-primary), var(--md-sys-elevation-2);
+  box-shadow:
+    0 0 0 2px var(--md-sys-color-primary),
+    var(--md-sys-elevation-2);
 }
 
 .large-search input {
@@ -1516,7 +1631,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   color: var(--md-sys-color-outline);
 }
 
-.empty-search-state, .outbox-empty {
+.empty-search-state,
+.outbox-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1525,14 +1641,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   text-align: center;
 }
 
-.empty-search-state h3, .outbox-empty h2 {
+.empty-search-state h3,
+.outbox-empty h2 {
   margin: 0;
   font-size: 18px;
   font-weight: 500;
   color: var(--md-sys-color-on-surface);
 }
 
-.empty-search-state p, .outbox-empty p {
+.empty-search-state p,
+.outbox-empty p {
   margin: 8px 0 0;
   font-size: 13px;
   color: var(--md-sys-color-on-surface-variant);
@@ -1821,7 +1939,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   border: 2px solid var(--md-sys-color-outline);
   padding: 0;
   cursor: pointer;
-  transition: background var(--md-sys-motion-duration-short) ease, border-color var(--md-sys-motion-duration-short) ease;
+  transition:
+    background var(--md-sys-motion-duration-short) ease,
+    border-color var(--md-sys-motion-duration-short) ease;
 }
 
 .m3-switch.is-on {
@@ -1840,9 +1960,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   border-radius: 50%;
   background: var(--md-sys-color-outline);
   color: var(--md-sys-color-surface);
-  transition: transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized),
-              background var(--md-sys-motion-duration-short) ease,
-              color var(--md-sys-motion-duration-short) ease;
+  transition:
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized),
+    background var(--md-sys-motion-duration-short) ease,
+    color var(--md-sys-motion-duration-short) ease;
 }
 
 .m3-switch.is-on .m3-switch-thumb {
@@ -1899,11 +2020,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 @keyframes scrim-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
-.compose-dialog, .wizard-dialog {
+.compose-dialog,
+.wizard-dialog {
   width: min(680px, 100%);
   max-height: calc(100vh - 48px);
   overflow: auto;
@@ -1914,22 +2040,30 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 @keyframes dialog-pop {
-  from { opacity: 0; transform: scale(0.96) translateY(10px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 .wizard-dialog {
   width: min(520px, 100%);
 }
 
-.compose-header, .wizard-header {
+.compose-header,
+.wizard-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 20px 24px 16px;
 }
 
-.compose-header h2, .wizard-header h2 {
+.compose-header h2,
+.wizard-header h2 {
   margin: 0;
   font-size: 20px;
   font-weight: 600;
@@ -2050,7 +2184,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 /* MD3 Filled & Tonal Action Buttons */
-.send-action, .primary-action {
+.send-action,
+.primary-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2066,7 +2201,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   transition: all var(--md-sys-motion-duration-short) ease;
 }
 
-.send-action:hover, .primary-action:hover {
+.send-action:hover,
+.primary-action:hover {
   box-shadow: var(--md-sys-elevation-2);
   background: color-mix(in srgb, var(--md-sys-color-primary) 90%, #fff 10%);
 }
@@ -2083,21 +2219,30 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   background: color-mix(in srgb, var(--md-sys-color-primary) 8%, transparent);
 }
 
-.compose-status, .wizard-status {
+.compose-status,
+.wizard-status {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-top: 14px;
   padding: 10px 14px;
   border-radius: var(--md-sys-shape-corner-small);
-  background: color-mix(in srgb, var(--md-sys-color-success) 12%, var(--md-sys-color-surface-container));
+  background: color-mix(
+    in srgb,
+    var(--md-sys-color-success) 12%,
+    var(--md-sys-color-surface-container)
+  );
   color: var(--md-sys-color-success);
   font-size: 12px;
   font-weight: 500;
 }
 
 .compose-status.is-error {
-  background: color-mix(in srgb, var(--md-sys-color-error) 12%, var(--md-sys-color-surface-container));
+  background: color-mix(
+    in srgb,
+    var(--md-sys-color-error) 12%,
+    var(--md-sys-color-surface-container)
+  );
   color: var(--md-sys-color-error);
 }
 
@@ -2127,7 +2272,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   font-weight: 600;
 }
 
-.step.is-done, .step.is-current {
+.step.is-done,
+.step.is-current {
   border-color: var(--md-sys-color-primary);
   background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
@@ -2314,7 +2460,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 .wizard-status.is-error {
-  background: color-mix(in srgb, var(--md-sys-color-error) 12%, var(--md-sys-color-surface-container));
+  background: color-mix(
+    in srgb,
+    var(--md-sys-color-error) 12%,
+    var(--md-sys-color-surface-container)
+  );
   color: var(--md-sys-color-error);
 }
 
@@ -2622,8 +2772,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
     height: 100%;
   }
   .message-row {
+    gap: 8px;
     min-height: 80px;
     padding: 12px 10px;
+  }
+  .message-select-control {
+    flex-basis: 26px;
+    width: 26px;
+    height: 26px;
+  }
+  .list-toolbar {
+    padding-inline: 12px;
   }
   .row-actions {
     display: flex;
@@ -2834,7 +2993,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     scroll-behavior: auto !important;
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;

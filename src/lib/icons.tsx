@@ -22,6 +22,8 @@ import inboxOutlineRounded from '@iconify-icons/material-symbols/inbox-outline-r
 import inboxRounded from '@iconify-icons/material-symbols/inbox-rounded';
 import lightModeOutlineRounded from '@iconify-icons/material-symbols/light-mode-outline-rounded';
 import menuRounded from '@iconify-icons/material-symbols/menu-rounded';
+import markEmailReadRounded from '@iconify-icons/material-symbols/mark-email-read-rounded';
+import markEmailUnreadRounded from '@iconify-icons/material-symbols/mark-email-unread-rounded';
 import moreHorizRounded from '@iconify-icons/material-symbols/more-horiz-rounded';
 import openInNewRounded from '@iconify-icons/material-symbols/open-in-new-rounded';
 import outboxRounded from '@iconify-icons/material-symbols/outbox-rounded';
@@ -33,6 +35,7 @@ import scheduleRounded from '@iconify-icons/material-symbols/schedule-rounded';
 import searchRounded from '@iconify-icons/material-symbols/search-rounded';
 import sendOutlineRounded from '@iconify-icons/material-symbols/send-outline-rounded';
 import sendRounded from '@iconify-icons/material-symbols/send-rounded';
+import selectAllRounded from '@iconify-icons/material-symbols/select-all-rounded';
 import settingsOutlineRounded from '@iconify-icons/material-symbols/settings-outline-rounded';
 import settingsRounded from '@iconify-icons/material-symbols/settings-rounded';
 import shieldOutlineRounded from '@iconify-icons/material-symbols/shield-outline-rounded';
@@ -73,6 +76,9 @@ export type IconName =
   | 'menu'
   | 'external'
   | 'clock'
+  | 'markRead'
+  | 'markUnread'
+  | 'selectAll'
   | 'folder'
   | 'folderFilled'
   | 'plus'
@@ -114,6 +120,9 @@ const icons = {
   menu: menuRounded,
   external: openInNewRounded,
   clock: scheduleRounded,
+  markRead: markEmailReadRounded,
+  markUnread: markEmailUnreadRounded,
+  selectAll: selectAllRounded,
   folder: folderOutlineRounded,
   folderFilled: folderRounded,
   plus: addRounded,
@@ -129,7 +138,13 @@ type AppIconProps = Omit<IconifyIconProps, 'icon' | 'height' | 'width'> & {
   title?: string;
 };
 
-export function Icon({ name, size = 20, strokeWidth: _strokeWidth, title, ...props }: AppIconProps) {
+export function Icon({
+  name,
+  size = 20,
+  strokeWidth: _strokeWidth,
+  title,
+  ...props
+}: AppIconProps) {
   return (
     <IconifyIcon
       {...props}

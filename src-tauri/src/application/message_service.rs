@@ -186,6 +186,19 @@ pub fn mutate_message(
         .mutate_message(&message_id, &mailbox_id, is_read, is_starred)
 }
 
+pub fn mutate_messages(
+    state: &AppState,
+    message_refs: Vec<(String, String)>,
+    is_read: Option<bool>,
+    is_starred: Option<bool>,
+) -> Result<usize, AppError> {
+    state
+        .database
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .mutate_messages(&message_refs, is_read, is_starred)
+}
+
 pub fn move_messages(
     state: &AppState,
     message_refs: Vec<(String, String)>,

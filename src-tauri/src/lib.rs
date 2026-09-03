@@ -65,6 +65,7 @@ pub fn run() {
             commands::get_message,
             commands::fetch_message_body,
             commands::mutate_message,
+            commands::mutate_messages,
             commands::mark_read,
             commands::set_starred,
             commands::save_draft,

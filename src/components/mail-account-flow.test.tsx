@@ -2,9 +2,10 @@
 
 import { act } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
+import { MemoryRouter } from 'react-router-dom';
 import type { Account, Message, ProviderPreset } from '../types';
 import { useUiStore } from '../stores/ui';
 
@@ -21,6 +22,7 @@ const apiMocks = vi.hoisted(() => ({
   listOutbox: vi.fn(),
   moveMessages: vi.fn(),
   mutateMessage: vi.fn(),
+  mutateMessages: vi.fn(),
   removeAccount: vi.fn(),
   retryOutboxItem: vi.fn(),
   saveDraft: vi.fn(),
@@ -31,89 +33,92 @@ const apiMocks = vi.hoisted(() => ({
   updateSettings: vi.fn(),
 }));
 
-const providerPresets = vi.hoisted(() => ([
-  {
-    id: 'qq',
-    displayName: 'QQ 邮箱',
-    emailDomainPatterns: ['qq.com'],
-    incoming: {
-      protocol: 'imap',
-      host: 'imap.qq.com',
-      port: 993,
-      tlsMode: 'implicit',
-      authMethods: ['password'],
-    },
-    outgoing: {
-      protocol: 'smtp',
-      host: 'smtp.qq.com',
-      port: 465,
-      tlsMode: 'implicit',
-      authMethods: ['password'],
-    },
-    helpText: '使用客户端授权码，不是 QQ 登录密码。',
-    capabilities: {},
-    quirks: [],
-  },
-  {
-    id: 'netease-163',
-    displayName: '网易 163 邮箱',
-    emailDomainPatterns: ['163.com'],
-    incoming: {
-      protocol: 'imap',
-      host: 'imap.163.com',
-      port: 993,
-      tlsMode: 'implicit',
-      authMethods: ['password'],
-    },
-    outgoing: {
-      protocol: 'smtp',
-      host: 'smtp.163.com',
-      port: 465,
-      tlsMode: 'implicit',
-      authMethods: ['password'],
-    },
-    helpText: '使用客户端授权码，不是网页登录密码。',
-    capabilities: {},
-    quirks: [],
-  },
-  {
-    id: 'generic',
-    displayName: '通用 IMAP + SMTP',
-    emailDomainPatterns: [],
-    incoming: {
-      protocol: 'imap',
-      host: '',
-      port: 993,
-      tlsMode: 'implicit',
-      authMethods: ['password'],
-    },
-    outgoing: {
-      protocol: 'smtp',
-      host: '',
-      port: 465,
-      tlsMode: 'implicit',
-      authMethods: ['password'],
-    },
-    helpText: '手动填写 IMAP 与 SMTP 端点。',
-    capabilities: {},
-    quirks: [],
-  },
-  {
-    id: 'generic-smtp',
-    displayName: '通用 SMTP（仅发件）',
-    emailDomainPatterns: [],
-    outgoing: {
-      protocol: 'smtp',
-      host: '',
-      port: 465,
-      tlsMode: 'implicit',
-      authMethods: ['password'],
-    },
-    helpText: '手动填写 SMTP 发件端点。此账户只用于发件。',
-    capabilities: {},
-    quirks: ['仅发件'],
-  },
-] satisfies ProviderPreset[]));
+const providerPresets = vi.hoisted(
+  () =>
+    [
+      {
+        id: 'qq',
+        displayName: 'QQ 邮箱',
+        emailDomainPatterns: ['qq.com'],
+        incoming: {
+          protocol: 'imap',
+          host: 'imap.qq.com',
+          port: 993,
+          tlsMode: 'implicit',
+          authMethods: ['password'],
+        },
+        outgoing: {
+          protocol: 'smtp',
+          host: 'smtp.qq.com',
+          port: 465,
+          tlsMode: 'implicit',
+          authMethods: ['password'],
+        },
+        helpText: '使用客户端授权码，不是 QQ 登录密码。',
+        capabilities: {},
+        quirks: [],
+      },
+      {
+        id: 'netease-163',
+        displayName: '网易 163 邮箱',
+        emailDomainPatterns: ['163.com'],
+        incoming: {
+          protocol: 'imap',
+          host: 'imap.163.com',
+          port: 993,
+          tlsMode: 'implicit',
+          authMethods: ['password'],
+        },
+        outgoing: {
+          protocol: 'smtp',
+          host: 'smtp.163.com',
+          port: 465,
+          tlsMode: 'implicit',
+          authMethods: ['password'],
+        },
+        helpText: '使用客户端授权码，不是网页登录密码。',
+        capabilities: {},
+        quirks: [],
+      },
+      {
+        id: 'generic',
+        displayName: '通用 IMAP + SMTP',
+        emailDomainPatterns: [],
+        incoming: {
+          protocol: 'imap',
+          host: '',
+          port: 993,
+          tlsMode: 'implicit',
+          authMethods: ['password'],
+        },
+        outgoing: {
+          protocol: 'smtp',
+          host: '',
+          port: 465,
+          tlsMode: 'implicit',
+          authMethods: ['password'],
+        },
+        helpText: '手动填写 IMAP 与 SMTP 端点。',
+        capabilities: {},
+        quirks: [],
+      },
+      {
+        id: 'generic-smtp',
+        displayName: '通用 SMTP（仅发件）',
+        emailDomainPatterns: [],
+        outgoing: {
+          protocol: 'smtp',
+          host: '',
+          port: 465,
+          tlsMode: 'implicit',
+          authMethods: ['password'],
+        },
+        helpText: '手动填写 SMTP 发件端点。此账户只用于发件。',
+        capabilities: {},
+        quirks: ['仅发件'],
+      },
+    ] satisfies ProviderPreset[],
+);
 
 vi.mock('../lib/tauri', () => ({
   ...apiMocks,
@@ -131,9 +136,19 @@ vi.mock('../lib/icons', () => ({
   Icon: ({ name }: { name: string }) => <span data-testid={`icon-${name}`} aria-hidden="true" />,
 }));
 
+vi.mock('@tanstack/react-virtual', () => ({
+  useVirtualizer: ({ count }: { count: number }) => ({
+    getTotalSize: () => count * 92,
+    getVirtualItems: () =>
+      Array.from({ length: count }, (_, index) => ({ index, start: index * 92 })),
+  }),
+}));
+
 import App from '../App';
 import { AccountWizard } from './AccountWizard';
 import { ComposeDialog } from './ComposeDialog';
+import { MailHome } from './MailHome';
+import { MessageList } from './MessageList';
 import { Reader } from './Reader';
 
 const account = (overrides: Partial<Account> = {}): Account => ({
@@ -146,6 +161,26 @@ const account = (overrides: Partial<Account> = {}): Account => ({
   incomingConfigured: true,
   outgoingConfigured: true,
   syncStatus: 'idle',
+  ...overrides,
+});
+
+const message = (overrides: Partial<Message> = {}): Message => ({
+  id: 'message-1',
+  accountId: 'account-a',
+  mailboxId: 'mailbox-a',
+  threadId: 'thread-1',
+  messageId: '<message-1@example.com>',
+  subject: '第一封邮件',
+  normalizedSubject: '第一封邮件',
+  from: { name: 'Sender', email: 'sender@example.com' },
+  to: [{ email: 'first@qq.com' }],
+  date: '2026-09-03T00:00:00Z',
+  preview: '预览内容',
+  bodyText: '邮件正文',
+  isRead: false,
+  isStarred: false,
+  hasAttachment: false,
+  labels: [],
   ...overrides,
 });
 
@@ -199,6 +234,8 @@ beforeEach(() => {
   apiMocks.searchMessages.mockResolvedValue([]);
   apiMocks.startSync.mockResolvedValue({ accountId: 'account-a', state: 'idle' });
   apiMocks.syncAll.mockResolvedValue([]);
+  apiMocks.mutateMessage.mockResolvedValue(message({ isRead: true }));
+  apiMocks.mutateMessages.mockResolvedValue({ mutated: 0 });
 });
 
 afterEach(() => {
@@ -235,7 +272,10 @@ describe('邮箱账户关键流程', () => {
     const savedAccount = account({ id: 'verified-account', email: 'valid@qq.com' });
     let resolveCreate: ((value: Account) => void) | undefined;
     apiMocks.createAccount.mockImplementation(
-      () => new Promise<Account>((resolve) => { resolveCreate = resolve; }),
+      () =>
+        new Promise<Account>((resolve) => {
+          resolveCreate = resolve;
+        }),
     );
 
     render(<AccountWizard onClose={vi.fn()} onSaved={onSaved} />);
@@ -251,7 +291,9 @@ describe('邮箱账户关键流程', () => {
     fireEvent.click(submit);
     expect(apiMocks.createAccount).toHaveBeenCalledTimes(1);
 
-    await act(async () => { resolveCreate?.(savedAccount); });
+    await act(async () => {
+      resolveCreate?.(savedAccount);
+    });
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
     expect(onSaved).toHaveBeenCalledWith(savedAccount);
   }, 15_000);
@@ -272,31 +314,37 @@ describe('邮箱账户关键流程', () => {
     fireEvent.click(screen.getByRole('button', { name: /通用 SMTP（仅发件）/ }));
     expect(screen.queryByText('收件 IMAP')).toBeNull();
     expect(screen.getByText('发件 SMTP')).toBeTruthy();
-    fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'sender@example.com' } });
-    fireEvent.change(screen.getByLabelText('SMTP 密码或授权码'), { target: { value: 'smtp-secret' } });
+    fireEvent.change(screen.getByLabelText('邮箱地址'), {
+      target: { value: 'sender@example.com' },
+    });
+    fireEvent.change(screen.getByLabelText('SMTP 密码或授权码'), {
+      target: { value: 'smtp-secret' },
+    });
     fireEvent.change(screen.getByLabelText('服务器'), { target: { value: 'smtp.example.com' } });
     fireEvent.change(screen.getByLabelText('端口'), { target: { value: '587' } });
     fireEvent.change(screen.getByLabelText('用户名（可选）'), { target: { value: 'smtp-user' } });
     fireEvent.change(screen.getByLabelText('TLS 模式'), { target: { value: 'starttls' } });
     fireEvent.click(screen.getByRole('button', { name: '验证并添加' }));
 
-    await waitFor(() => expect(apiMocks.createAccount).toHaveBeenCalledWith({
-      email: 'sender@example.com',
-      displayName: 'sender',
-      providerId: 'generic-smtp',
-      secret: 'smtp-secret',
-      incomingSecret: undefined,
-      outgoingSecret: 'smtp-secret',
-      incoming: undefined,
-      outgoing: {
-        protocol: 'smtp',
-        host: 'smtp.example.com',
-        port: 587,
-        tlsMode: 'starttls',
-        authMethod: 'password',
-        username: 'smtp-user',
-      },
-    }));
+    await waitFor(() =>
+      expect(apiMocks.createAccount).toHaveBeenCalledWith({
+        email: 'sender@example.com',
+        displayName: 'sender',
+        providerId: 'generic-smtp',
+        secret: 'smtp-secret',
+        incomingSecret: undefined,
+        outgoingSecret: 'smtp-secret',
+        incoming: undefined,
+        outgoing: {
+          protocol: 'smtp',
+          host: 'smtp.example.com',
+          port: 587,
+          tlsMode: 'starttls',
+          authMethod: 'password',
+          username: 'smtp-user',
+        },
+      }),
+    );
     expect(onSaved).toHaveBeenCalledWith(savedAccount);
   }, 15_000);
 
@@ -325,22 +373,32 @@ describe('邮箱账户关键流程', () => {
     ];
     apiMocks.sendDraft.mockResolvedValue({ outboxId: 'outbox-1', state: 'queued' });
 
-    render(withQueryClient(
-      <ComposeDialog accounts={accounts} defaultAccountId="account-a" onClose={vi.fn()} />,
-    ));
+    render(
+      withQueryClient(
+        <ComposeDialog accounts={accounts} defaultAccountId="account-a" onClose={vi.fn()} />,
+      ),
+    );
 
     fireEvent.change(screen.getByLabelText('选择发件账户'), { target: { value: 'account-b' } });
-    fireEvent.change(screen.getByPlaceholderText('输入一个或多个邮箱地址'), { target: { value: 'receiver@example.com' } });
-    fireEvent.change(screen.getByPlaceholderText('邮件主题'), { target: { value: '多账户发件测试' } });
-    fireEvent.change(screen.getByPlaceholderText('写下你的邮件内容…'), { target: { value: '正文' } });
+    fireEvent.change(screen.getByPlaceholderText('输入一个或多个邮箱地址'), {
+      target: { value: 'receiver@example.com' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('邮件主题'), {
+      target: { value: '多账户发件测试' },
+    });
+    fireEvent.change(screen.getByPlaceholderText('写下你的邮件内容…'), {
+      target: { value: '正文' },
+    });
     fireEvent.click(screen.getByRole('button', { name: '发送' }));
 
     await waitFor(() => expect(apiMocks.sendDraft).toHaveBeenCalledTimes(1));
-    expect(apiMocks.sendDraft).toHaveBeenCalledWith(expect.objectContaining({
-      accountId: 'account-b',
-      to: 'receiver@example.com',
-      subject: '多账户发件测试',
-    }));
+    expect(apiMocks.sendDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: 'account-b',
+        to: 'receiver@example.com',
+        subject: '多账户发件测试',
+      }),
+    );
   }, 15_000);
 
   it('HTML 纯文本正文可阅读，回复保留原邮件线程与收件账户', () => {
@@ -353,10 +411,7 @@ describe('邮箱账户关键流程', () => {
       subject: '只含 HTML 的邮件',
       normalizedSubject: '只含 html 的邮件',
       from: { name: 'Sender', email: 'sender@example.com' },
-      to: [
-        { email: 'second@163.com' },
-        { email: 'colleague@example.com' },
-      ],
+      to: [{ email: 'second@163.com' }, { email: 'colleague@example.com' }],
       date: '2026-09-03T00:00:00Z',
       preview: '短预览',
       bodyHtmlText: '完整安全文本正文',
@@ -370,11 +425,83 @@ describe('邮箱账户关键流程', () => {
 
     expect(screen.getByText('完整安全文本正文')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '回复' }));
-    expect(useUiStore.getState().composeDraft).toEqual(expect.objectContaining({
-      accountId: 'account-b',
-      inReplyTo: '<message-1@example.com>',
-      references: ['<message-1@example.com>'],
-      to: 'sender@example.com',
-    }));
+    expect(useUiStore.getState().composeDraft).toEqual(
+      expect.objectContaining({
+        accountId: 'account-b',
+        inReplyTo: '<message-1@example.com>',
+        references: ['<message-1@example.com>'],
+        to: 'sender@example.com',
+      }),
+    );
+  });
+
+  it('打开阅读器后把未读邮件持久化为已读，且不会重复提交', async () => {
+    const unread = message();
+    apiMocks.mutateMessage.mockResolvedValue({ ...unread, isRead: true });
+
+    render(
+      withQueryClient(
+        <MemoryRouter>
+          <MailHome
+            hasAccounts
+            accounts={[account()]}
+            messages={[unread]}
+            mailboxes={[]}
+            isLoading={false}
+            onOpenSettings={vi.fn()}
+          />
+        </MemoryRouter>,
+      ),
+    );
+
+    await waitFor(() =>
+      expect(apiMocks.mutateMessage).toHaveBeenCalledWith(
+        { messageId: unread.id, mailboxId: unread.mailboxId },
+        { isRead: true },
+      ),
+    );
+    expect(apiMocks.mutateMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('邮件列表支持批量标记已读和移至回收站', async () => {
+    const first = message();
+    const second = message({
+      id: 'message-2',
+      subject: '第二封邮件',
+      messageId: '<message-2@example.com>',
+    });
+    const onBulkMutate = vi.fn().mockResolvedValue(undefined);
+    const onBulkDelete = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <MemoryRouter>
+        <MessageList
+          accounts={[account()]}
+          messages={[first, second]}
+          onSelect={vi.fn()}
+          onToggle={vi.fn()}
+          onBulkMutate={onBulkMutate}
+          onBulkDelete={onBulkDelete}
+        />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole('button', { name: '选择 第一封邮件' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '批量编辑' }));
+    expect(screen.getByText('批量编辑')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '选择 第一封邮件' }));
+    fireEvent.click(screen.getByRole('button', { name: '选择 第二封邮件' }));
+    expect(screen.getByText('2 已选')).toBeTruthy();
+
+    const toolbar = screen.getByText('2 已选').closest('.list-toolbar');
+    expect(toolbar).not.toBeNull();
+    fireEvent.click(within(toolbar as HTMLElement).getByRole('button', { name: '标记为已读' }));
+    await waitFor(() =>
+      expect(onBulkMutate).toHaveBeenCalledWith([first, second], { isRead: true }),
+    );
+
+    fireEvent.click(within(toolbar as HTMLElement).getByRole('button', { name: '移至回收站' }));
+    await waitFor(() => expect(onBulkDelete).toHaveBeenCalledWith([first, second]));
+    await waitFor(() => expect(screen.queryByText('2 已选')).toBeNull());
   });
 });

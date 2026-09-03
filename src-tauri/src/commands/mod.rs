@@ -305,6 +305,26 @@ pub fn mutate_message(
 }
 
 #[tauri::command]
+pub fn mutate_messages(
+    state: State<'_, AppState>,
+    messages: Vec<MessageInstanceRefInput>,
+    mutation: MessageMutation,
+) -> Result<serde_json::Value, AppErrorDto> {
+    let message_refs = messages
+        .into_iter()
+        .map(|message| (message.message_id, message.mailbox_id))
+        .collect();
+    let count = message_service::mutate_messages(
+        &state,
+        message_refs,
+        mutation.is_read,
+        mutation.is_starred,
+    )
+    .map_err(AppErrorDto::from)?;
+    Ok(serde_json::json!({ "mutated": count }))
+}
+
+#[tauri::command]
 pub fn mark_read(
     state: State<'_, AppState>,
     message_id: String,

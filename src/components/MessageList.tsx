@@ -1,4 +1,4 @@
-import { useRef, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Account, Message } from '../types';
@@ -11,9 +11,17 @@ interface MessageListProps {
   selectedMessageId?: string;
   onSelect: (id: string) => void;
   onToggle: (messageId: string, mutation: { isRead?: boolean; isStarred?: boolean }) => void;
+  onBulkMutate: (
+    messages: Message[],
+    mutation: { isRead?: boolean; isStarred?: boolean },
+  ) => Promise<void> | void;
+  onBulkDelete: (messages: Message[]) => Promise<void> | void;
   onRefresh?: () => void;
   isLoading?: boolean;
 }
+
+const messageInstanceKey = (message: Pick<Message, 'id' | 'mailboxId'>) =>
+  `${message.id}\u0000${message.mailboxId}`;
 
 const formatTime = (value: string) => {
   const date = new Date(value);
@@ -30,10 +38,23 @@ const formatTime = (value: string) => {
   return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' });
 };
 
-export function MessageList({ accounts, messages, selectedMessageId, onSelect, onToggle, onRefresh, isLoading }: MessageListProps) {
+export function MessageList({
+  accounts,
+  messages,
+  selectedMessageId,
+  onSelect,
+  onToggle,
+  onBulkMutate,
+  onBulkDelete,
+  onRefresh,
+  isLoading,
+}: MessageListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const { setSearchOpen, setNavPage } = useUiStore();
   const navigate = useNavigate();
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedMessageKeys, setSelectedMessageKeys] = useState<Set<string>>(() => new Set());
+  const [bulkActionPending, setBulkActionPending] = useState(false);
   const openSearch = () => {
     setSearchOpen(true);
     setNavPage('search');
@@ -48,18 +69,152 @@ export function MessageList({ accounts, messages, selectedMessageId, onSelect, o
   });
 
   const unreadCount = messages.filter((message) => !message.isRead).length;
+  const selectedMessages = useMemo(
+    () => messages.filter((message) => selectedMessageKeys.has(messageInstanceKey(message))),
+    [messages, selectedMessageKeys],
+  );
+  const hasSelection = selectedMessages.length > 0;
+
+  useEffect(() => {
+    const availableKeys = new Set(messages.map(messageInstanceKey));
+    setSelectedMessageKeys((current) => {
+      const next = new Set([...current].filter((key) => availableKeys.has(key)));
+      return next.size === current.size ? current : next;
+    });
+  }, [messages]);
+
+  const toggleSelection = (message: Message) => {
+    const key = messageInstanceKey(message);
+    setSelectedMessageKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const enterBulkMode = () => setBulkMode(true);
+  const selectAll = () => setSelectedMessageKeys(new Set(messages.map(messageInstanceKey)));
+  const clearSelection = () => setSelectedMessageKeys(new Set());
+  const exitBulkMode = () => {
+    clearSelection();
+    setBulkMode(false);
+  };
+
+  const runBulkMutation = (mutation: { isRead?: boolean; isStarred?: boolean }) => {
+    if (!hasSelection || bulkActionPending) return;
+    setBulkActionPending(true);
+    void Promise.resolve()
+      .then(() => onBulkMutate(selectedMessages, mutation))
+      .catch(() => undefined)
+      .finally(() => setBulkActionPending(false));
+  };
+
+  const runBulkDelete = () => {
+    if (!hasSelection || bulkActionPending) return;
+    setBulkActionPending(true);
+    void Promise.resolve()
+      .then(() => onBulkDelete(selectedMessages))
+      .then(clearSelection)
+      .catch(() => undefined)
+      .finally(() => setBulkActionPending(false));
+  };
 
   return (
     <div className="message-list-shell">
       <div className="list-toolbar">
-        <div className="list-toolbar-status">
-          <span className="muted-count">{unreadCount > 0 ? `${unreadCount} 封未读` : '全部已读'}</span>
-          <span className="list-total-count">共 {messages.length} 封</span>
-        </div>
+        {bulkMode ? (
+          <div className="list-toolbar-status list-selection-summary" aria-live="polite">
+            <button
+              className="icon-button"
+              type="button"
+              onClick={exitBulkMode}
+              aria-label="退出批量编辑"
+              title="退出批量编辑"
+            >
+              <Icon name="close" size={19} />
+            </button>
+            <span className="selection-count">
+              {hasSelection ? `${selectedMessages.length} 已选` : '批量编辑'}
+            </span>
+          </div>
+        ) : (
+          <div className="list-toolbar-status">
+            <span className="muted-count">
+              {unreadCount > 0 ? `${unreadCount} 封未读` : '全部已读'}
+            </span>
+            <span className="list-total-count">共 {messages.length} 封</span>
+          </div>
+        )}
         <div className="list-toolbar-actions">
-          <button className="icon-button" onClick={onRefresh} aria-label="刷新邮件" title="刷新同步">
-            <Icon name="refresh" size={19} />
-          </button>
+          {bulkMode && hasSelection ? (
+            <>
+              <button
+                className="icon-button bulk-action"
+                type="button"
+                onClick={() => runBulkMutation({ isRead: true })}
+                disabled={bulkActionPending}
+                aria-label="标记为已读"
+                title="标记为已读"
+              >
+                <Icon name="markRead" size={19} />
+              </button>
+              <button
+                className="icon-button bulk-action"
+                type="button"
+                onClick={() => runBulkMutation({ isRead: false })}
+                disabled={bulkActionPending}
+                aria-label="标记为未读"
+                title="标记为未读"
+              >
+                <Icon name="markUnread" size={19} />
+              </button>
+              <button
+                className="icon-button bulk-action bulk-delete"
+                type="button"
+                onClick={runBulkDelete}
+                disabled={bulkActionPending}
+                aria-label="移至回收站"
+                title="移至回收站"
+              >
+                <Icon name="trash" size={19} />
+              </button>
+            </>
+          ) : bulkMode ? (
+            <button
+              className="icon-button list-select-all"
+              type="button"
+              onClick={selectAll}
+              disabled={messages.length === 0 || isLoading}
+              aria-label="全选当前列表"
+              title="全选当前列表"
+            >
+              <Icon name="selectAll" size={19} />
+            </button>
+          ) : (
+            <>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={onRefresh}
+                aria-label="刷新邮件"
+                title="刷新同步"
+              >
+                <Icon name="refresh" size={19} />
+              </button>
+              <button
+                className="text-action list-bulk-mode-trigger"
+                type="button"
+                onClick={enterBulkMode}
+                disabled={messages.length === 0 || isLoading}
+                aria-label="批量编辑"
+                title="批量编辑"
+              >
+                <Icon name="selectAll" size={19} />
+                <span>批量编辑</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
       <div className="search-bar" role="search" onClick={openSearch}>
@@ -92,10 +247,17 @@ export function MessageList({ accounts, messages, selectedMessageId, onSelect, o
                 <MessageRow
                   key={message.id}
                   message={message}
-                  accountLabel={accounts.length > 1 ? accounts.find((account) => account.id === message.accountId)?.email : undefined}
+                  accountLabel={
+                    accounts.length > 1
+                      ? accounts.find((account) => account.id === message.accountId)?.email
+                      : undefined
+                  }
                   selected={message.id === selectedMessageId}
+                  bulkMode={bulkMode}
+                  multiSelected={selectedMessageKeys.has(messageInstanceKey(message))}
                   onSelect={onSelect}
                   onToggle={(mutation) => onToggle(message.id, mutation)}
+                  onToggleSelection={() => toggleSelection(message)}
                   style={{ transform: `translateY(${item.start}px)` }}
                 />
               );
@@ -111,26 +273,51 @@ function MessageRow({
   message,
   accountLabel,
   selected,
+  bulkMode,
+  multiSelected,
   onSelect,
   onToggle,
+  onToggleSelection,
   style,
 }: {
   message: Message;
   accountLabel?: string;
   selected: boolean;
+  bulkMode: boolean;
+  multiSelected: boolean;
   onSelect: (id: string) => void;
   onToggle: (mutation: { isRead?: boolean; isStarred?: boolean }) => void;
+  onToggleSelection: () => void;
   style: CSSProperties;
 }) {
-  const avatarLetter = message.from.name?.slice(0, 1) ?? message.from.email.slice(0, 1).toUpperCase();
+  const avatarLetter =
+    message.from.name?.slice(0, 1) ?? message.from.email.slice(0, 1).toUpperCase();
 
   return (
     <article
-      className={`message-row ${selected ? 'is-selected' : ''} ${message.isRead ? '' : 'is-unread'}`}
+      className={`message-row ${selected ? 'is-selected' : ''} ${multiSelected ? 'is-multi-selected' : ''} ${message.isRead ? '' : 'is-unread'}`}
       style={style}
       role="listitem"
       onClick={() => onSelect(message.id)}
     >
+      {bulkMode && (
+        <button
+          className={`message-select-control ${multiSelected ? 'is-checked' : ''} selection-active`}
+          type="button"
+          aria-label={
+            multiSelected
+              ? `取消选择 ${message.subject || '(无主题)'}`
+              : `选择 ${message.subject || '(无主题)'}`
+          }
+          aria-pressed={multiSelected}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleSelection();
+          }}
+        >
+          <Icon name="check" size={17} />
+        </button>
+      )}
       <div className="row-avatar">{avatarLetter}</div>
       <div className="row-main">
         <div className="row-topline">
@@ -141,7 +328,10 @@ function MessageRow({
           <span className="subject-text">{message.subject || '(无主题)'}</span>
           {!message.isRead && <span className="unread-dot" title="未读" />}
         </div>
-        <div className="row-preview">{accountLabel && <span className="row-account-label">{accountLabel}</span>}{message.preview}</div>
+        <div className="row-preview">
+          {accountLabel && <span className="row-account-label">{accountLabel}</span>}
+          {message.preview}
+        </div>
       </div>
       <div className="row-actions">
         <button
@@ -155,7 +345,9 @@ function MessageRow({
         >
           <Icon name={message.isStarred ? 'starFilled' : 'star'} size={18} />
         </button>
-        {message.hasAttachment && <Icon name="paperclip" size={16} className="attachment-icon" title="包含附件" />}
+        {message.hasAttachment && (
+          <Icon name="paperclip" size={16} className="attachment-icon" title="包含附件" />
+        )}
         <button
           className="row-icon row-read-toggle"
           aria-label={message.isRead ? '标记为未读' : '标记为已读'}
