@@ -15,6 +15,7 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:install:macos": "bash scripts/build-install-macos-local.sh",
+    "release:verify-version": "node scripts/verify-release-version.mjs",
     "format": "prettier --write ."
   },
   "dependencies": {

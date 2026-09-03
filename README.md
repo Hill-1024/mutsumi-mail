@@ -54,6 +54,7 @@ pnpm build
 - [SQLite 设计](docs/DATABASE.md)
 - [安全模型](docs/SECURITY.md)
 - [测试策略](docs/TESTING.md)
+- [发行与固定签名](docs/RELEASING.md)
 
 ## `unsafe` 说明
 

@@ -19,7 +19,11 @@ export default tseslint.config(
     },
   },
   {
-    files: ['**/*.{js,ts,tsx}'],
+    files: ['scripts/**/*.{js,mjs,cjs}'],
+    languageOptions: { globals: globals.node },
+  },
+  {
+    files: ['**/*.{js,mjs,cjs,ts,tsx}'],
     rules: { 'no-console': ['warn', { allow: ['warn', 'error'] }] },
   },
 );

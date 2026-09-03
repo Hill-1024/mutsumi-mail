@@ -13,10 +13,13 @@ mod sync;
 use std::error::Error;
 use std::fs;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::Manager;
 
 pub fn run() {
-    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(
+    let builder = tauri::Builder::default();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(
         |app, _arguments, _working_directory| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
