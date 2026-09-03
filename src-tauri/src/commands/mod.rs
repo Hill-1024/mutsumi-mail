@@ -45,9 +45,13 @@ pub async fn create_account(
     state: State<'_, AppState>,
     input: CreateAccountInput,
 ) -> Result<crate::domain::Account, AppErrorDto> {
-    account_service::create_account(&state, input)
+    let account = account_service::create_account(&state, input)
         .await
-        .map_err(Into::into)
+        .map_err(AppErrorDto::from)?;
+    // The account was fully verified before persistence, so it is safe to let the backend own
+    // its first sync and long-lived IDLE listener as soon as the wizard returns to the mailbox.
+    state.realtime.restart_account(&account.id);
+    Ok(account)
 }
 
 #[tauri::command]
@@ -145,6 +149,7 @@ fn remove_account_from_state(state: &AppState, account_id: &str) -> Result<(), A
             );
         }
     }
+    state.realtime.wake();
     Ok(())
 }
 
@@ -379,7 +384,11 @@ pub fn start_sync(
     app: tauri::AppHandle,
     account_id: String,
 ) -> Result<SyncStatus, AppErrorDto> {
-    sync_service::start_sync(&state, app, account_id).map_err(Into::into)
+    let status =
+        sync_service::start_sync(&state, app, account_id.clone()).map_err(AppErrorDto::from)?;
+    // A direct user refresh is an explicit retry after a terminal listener failure.
+    state.realtime.restart_account(&account_id);
+    Ok(status)
 }
 
 #[tauri::command]
@@ -394,7 +403,9 @@ pub fn cancel_sync(state: State<'_, AppState>, account_id: String) -> Result<(),
             ))
         })?
         .mark_account_sync_cancelled(&account_id)
-        .map_err(Into::into)
+        .map_err(AppErrorDto::from)?;
+    state.realtime.wake();
+    Ok(())
 }
 
 #[tauri::command]
@@ -433,7 +444,7 @@ pub fn sync_all(
         .filter(is_sync_candidate)
         .map(|account| {
             let account_id = account.id;
-            match sync_service::start_sync(&state, app.clone(), account_id.clone()) {
+            let status = match sync_service::start_sync(&state, app.clone(), account_id.clone()) {
                 Ok(status) => status,
                 Err(error) => state
                     .sync
@@ -447,7 +458,9 @@ pub fn sync_all(
                         message: Some(error.to_string()),
                         retryable: error.retryable(),
                     }),
-            }
+            };
+            state.realtime.restart_account(&account_id);
+            status
         })
         .collect();
     Ok(statuses)
@@ -463,7 +476,7 @@ pub fn update_account(
     account_id: String,
     patch: serde_json::Value,
 ) -> Result<serde_json::Value, AppErrorDto> {
-    state
+    let account = state
         .database
         .lock()
         .map_err(|_| {
@@ -472,8 +485,9 @@ pub fn update_account(
             ))
         })?
         .update_account(&account_id, &patch)
-        .map(|account| serde_json::to_value(account).unwrap_or_default())
-        .map_err(AppErrorDto::from)
+        .map_err(AppErrorDto::from)?;
+    state.realtime.restart_account(&account_id);
+    Ok(serde_json::to_value(account).unwrap_or_default())
 }
 
 #[tauri::command]
@@ -502,7 +516,10 @@ pub fn reconnect_account(
     app: tauri::AppHandle,
     account_id: String,
 ) -> Result<SyncStatus, AppErrorDto> {
-    sync_service::start_sync(&state, app, account_id).map_err(Into::into)
+    let status =
+        sync_service::start_sync(&state, app, account_id.clone()).map_err(AppErrorDto::from)?;
+    state.realtime.restart_account(&account_id);
+    Ok(status)
 }
 
 #[tauri::command]
@@ -529,6 +546,7 @@ pub fn set_mailbox_sync_policy(
         })?
         .set_mailbox_sync_enabled(&mailbox_id, sync_enabled)
         .map_err(AppErrorDto::from)?;
+    state.realtime.wake();
     Ok(serde_json::json!({ "mailboxId": mailbox_id, "syncEnabled": sync_enabled }))
 }
 
@@ -804,7 +822,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{fetch_message_body_from_state, is_sync_candidate, remove_account_from_state};
-    use crate::app_state::{AppState, SyncCoordinator};
+    use crate::app_state::{AppState, RealtimeSyncCoordinator, SyncCoordinator};
     use crate::auth::secret_store::{SecretStore, SecretStoreError};
     use crate::domain::account::CreateAccountInput;
     use crate::domain::Account;
@@ -857,6 +875,7 @@ mod tests {
             database: Mutex::new(Database::open_in_memory().expect("database")),
             secret_store: Arc::new(FailingDeleteSecretStore),
             sync: Arc::new(SyncCoordinator::new()),
+            realtime: Arc::new(RealtimeSyncCoordinator::new()),
         };
         let error = fetch_message_body_from_state(
             &state,
@@ -898,6 +917,7 @@ mod tests {
             database: Mutex::new(database),
             secret_store: Arc::new(FailingDeleteSecretStore),
             sync: Arc::new(SyncCoordinator::new()),
+            realtime: Arc::new(RealtimeSyncCoordinator::new()),
         };
 
         remove_account_from_state(&state, &account.id)

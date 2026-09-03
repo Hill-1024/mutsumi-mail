@@ -8,6 +8,7 @@ Mutsumi Mail 是一个 Rust + Tauri v2 + React/Vite 的离线优先桌面邮件�
 - QQ、网易 163 和 Generic IMAP/SMTP 添加流程；只有 IMAP 与 SMTP 都验证成功后才保存账户，失败不会进入主界面或启动同步。
 - 多账户独立同步、统一收件箱、单账户范围切换，以及按收件账户回复和按所选账户发信。
 - 严格的 IMAP TLS/STARTTLS 会话、文件夹发现、UID 增量同步、历史回填、UIDVALIDITY 处理、正文按需获取和本地操作上传。
+- Rust 后台同步 supervisor：自动收件账户保持一个 IMAP `IDLE` 监听，服务端事件才触发增量同步；不支持 `IDLE` 的旧服务器才使用桌面 30 分钟、移动端前台 60 分钟的低频兜底。认证或钥匙串失败会停止自动重试，等待用户主动重连。
 - SMTP 发送前校验、持久化发件队列、稳定 Message-ID 与不可变 MIME 快照；结果不确定时不会盲目重发。
 - SQLite migration：accounts、mailboxes、messages、instances、drafts、outbox、pending operations、sync cursors、FTS5。
 - 系统 keyring-backed `SecretStore` 抽象；SQLite 只保留 `secret_ref`，进程内串行读取并缓存凭据，收发使用同一授权码时只创建一个钥匙串项目。
@@ -42,7 +43,7 @@ pnpm build
 - QQ：`imap.qq.com:993`（IMAPS）、`smtp.qq.com:465`（SMTPS）
 - 163：`imap.163.com:993`（IMAPS）、`smtp.163.com:465`（SMTPS）
 
-仓库和 CI 不保存真实授权码；协议 smoke test 必须在本机使用用户自己的凭据，并检查重启后离线读取、Sent 副本和重复同步。当前版本不支持附件编写、OAuth、POP3/JMAP 或后台 IDLE 推送。
+仓库和 CI 不保存真实授权码；协议 smoke test 必须在本机使用用户自己的凭据，并检查重启后离线读取、Sent 副本和重复同步。当前版本不支持附件编写、OAuth 或 POP3/JMAP；移动端进入系统后台时会关闭普通网络 socket，回到前台后立即补同步，不伪造会被系统终止的常驻连接。
 
 发送成功后会重新同步对应账户的 Sent 文件夹。客户端不会在未确认服务商策略时盲目 APPEND，以免和服务器自动保存产生重复邮件；界面会如实显示 Sent 副本仍待确认或当前不可用。
 

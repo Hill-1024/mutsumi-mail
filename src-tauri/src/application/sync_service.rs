@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::app_state::AppState;
 use crate::backends::imap::{ImapIncomingBackend, MAX_FETCH_MESSAGES};
 use crate::backends::incoming::{
-    IncomingError, IncomingMailBackend, IncomingMailboxSnapshot, IncomingMessage,
+    IncomingConfig, IncomingError, IncomingMailBackend, IncomingMailboxSnapshot, IncomingMessage,
     RemoteMessageOperation,
 };
 use crate::domain::{Address, SyncStatus};
@@ -95,6 +95,21 @@ pub fn start_sync_if_idle(
     start_sync_with_token(state, app, account_id, token).map(Some)
 }
 
+/// Starts an incidental sync from an already-authorized realtime connection. Keeping the
+/// credential in that listener's lifetime avoids reopening the OS keychain for every IDLE wake.
+pub(crate) fn start_sync_if_idle_with_session(
+    state: &AppState,
+    app: AppHandle,
+    account_id: String,
+    config: IncomingConfig,
+    secret: String,
+) -> Result<Option<SyncStatus>, AppError> {
+    let Some(token) = state.sync.try_start(&account_id) else {
+        return Ok(None);
+    };
+    start_sync_with_loaded_session(state, app, account_id, config, secret, token).map(Some)
+}
+
 fn start_sync_with_token(
     state: &AppState,
     app: AppHandle,
@@ -115,6 +130,17 @@ fn start_sync_with_token(
             return Err(error);
         }
     };
+    start_sync_with_loaded_session(state, app, account_id, config, secret, token)
+}
+
+fn start_sync_with_loaded_session(
+    state: &AppState,
+    app: AppHandle,
+    account_id: String,
+    config: IncomingConfig,
+    secret: String,
+    token: CancellationToken,
+) -> Result<SyncStatus, AppError> {
     let initial_status = SyncStatus {
         account_id: account_id.clone(),
         state: "syncing".into(),
@@ -948,6 +974,7 @@ fn record_start_error(
         state.sync.set_status(status.clone());
         let _ = app.emit("sync-progress", status);
     });
+    state.realtime.wake();
 }
 
 fn successful_sync_status(account_id: String, report: SyncReport) -> SyncStatus {
@@ -1019,6 +1046,7 @@ fn finish_current_sync(
         state.sync.set_status(status.clone());
         let _ = app.emit("sync-progress", status);
     });
+    state.realtime.wake();
 }
 
 fn with_current_sync_state<R>(
@@ -1054,7 +1082,7 @@ fn publish_status(
         .ok_or(AppError::Cancelled)
 }
 
-fn load_incoming_session(
+pub(crate) fn load_incoming_session(
     state: &AppState,
     account_id: &str,
 ) -> Result<(crate::backends::incoming::IncomingConfig, String), AppError> {

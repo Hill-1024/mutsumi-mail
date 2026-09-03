@@ -13,7 +13,6 @@ mod sync;
 use std::error::Error;
 use std::fs;
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri::Manager;
 
 pub fn run() {
@@ -27,7 +26,7 @@ pub fn run() {
             }
         },
     ));
-    let result = builder
+    let app = match builder
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -49,6 +48,7 @@ pub fn run() {
                 .try_init()
                 .ok();
             let app_handle = app.handle().clone();
+            application::realtime_sync_service::start(app_handle.clone());
             for outbox_id in queued_outbox_ids {
                 application::compose_service::spawn_delivery(app_handle.clone(), outbox_id);
             }
@@ -101,8 +101,35 @@ pub fn run() {
             commands::clear_cache,
             commands::export_diagnostics
         ])
-        .run(tauri::generate_context!());
-    if let Err(error) = result {
-        eprintln!("Mutsumi Mail failed to start: {error}");
-    }
+        .build(tauri::generate_context!())
+    {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("Mutsumi Mail failed to start: {error}");
+            return;
+        }
+    };
+    app.run(|app, event| {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        match event {
+            // Mobile operating systems suspend ordinary processes in the background. Closing
+            // the socket here avoids a fake "always on" loop that wastes battery and is
+            // terminated by the OS; resume starts a fresh incremental sync and IDLE listener.
+            tauri::RunEvent::Suspended => {
+                if let Some(state) = app.try_state::<app_state::AppState>() {
+                    state.realtime.suspend();
+                }
+            }
+            tauri::RunEvent::Resumed => {
+                if let Some(state) = app.try_state::<app_state::AppState>() {
+                    state.realtime.resume();
+                }
+            }
+            _ => {}
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let _ = (app, event);
+        }
+    });
 }

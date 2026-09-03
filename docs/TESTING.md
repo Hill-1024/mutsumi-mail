@@ -3,7 +3,7 @@
 ## 当前自动化检查
 
 - TypeScript strict、ESLint、Vitest：Provider 识别、搜索过滤、乐观 flag、添加失败不导航、防重复提交、零账户空状态、多账户 From 选择、HTML-only 阅读和回复账户归属。
-- Rust unit/protocol tests（当前 84 项）：严格 tagged IMAP 结果、TLS 模式、LIST/FETCH、UIDVALIDITY、批量增量同步、历史游标、正文懒加载、远端操作、SMTP 成功/失败/不确定结果、稳定 MIME 快照、钥匙串进程缓存和崩溃恢复。
+- Rust unit/protocol tests（当前 94 项）：严格 tagged IMAP 结果、TLS 模式、LIST/FETCH、UIDVALIDITY、IDLE 握手/事件/keepalive、后台监听生命周期、批量增量同步、历史游标、正文懒加载、远端操作、SMTP 成功/失败/不确定结果、稳定 MIME 快照、钥匙串进程缓存和崩溃恢复。
 - SQLite migration test：临时数据库执行全部 migration，验证账户唯一性、精确 message instance、账户隔离、同步游标、发件队列 CAS、待上传操作和覆盖发件人/收件人的 FTS5 搜索。
 
 ## 协议测试边界

@@ -21,7 +21,6 @@ function MailApp() {
   const navigate = useNavigate();
   const [accountWizardOpen, setAccountWizardOpen] = useState(false);
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
-  const initialSyncStarted = useRef(false);
   const initialRouteNormalized = useRef(false);
   const { selectedMailboxId, selectMailbox, searchOpen, composeOpen, setComposeOpen, setSyncMessage } = useUiStore();
   const accounts = useQuery({ queryKey: ['accounts'], queryFn: listAccounts });
@@ -87,22 +86,6 @@ function MailApp() {
   }, [accountItems.length, isVirtualMailbox, selectMailbox, selectedMailboxExists]);
 
   useEffect(() => {
-    if (!isTauriRuntime || initialSyncStarted.current || accountItems.length === 0) return;
-    initialSyncStarted.current = true;
-    // A validated account is synced immediately by handleAccountSaved. On later launches we
-    // resume only accounts that have completed at least one sync; legacy accounts created by
-    // older builds before connection validation must not trigger repeated Keychain prompts.
-    const establishedAccounts = accountItems.filter(
-      (account) => account.enabled && account.incomingConfigured && account.lastSyncedAt,
-    );
-    if (establishedAccounts.length === 0) return;
-    void Promise.allSettled(establishedAccounts.map((account) => startSync(account.id))).then((results) => {
-      const failure = results.find((result) => result.status === 'rejected');
-      if (failure?.status === 'rejected') setSyncMessage(appErrorMessage(failure.reason));
-    });
-  }, [accountItems, setSyncMessage]);
-
-  useEffect(() => {
     if (!isTauriRuntime) return undefined;
     let unlistenSync: (() => void) | undefined;
     let unlistenOutbox: (() => void) | undefined;
@@ -126,10 +109,7 @@ function MailApp() {
   }, [scopedAccountId, setSyncMessage]);
 
   const handleAccountSaved = (account: Account) => {
-    // Adding the first account already starts its sync below. Prevent the startup
-    // effect from immediately cancelling and restarting that same request.
     const shouldStartSync = canSyncAccount(account);
-    if (accountItems.length === 0 && shouldStartSync) initialSyncStarted.current = true;
     queryClient.setQueryData<Account[]>(['accounts'], (current = []) => [
       account,
       ...current.filter((item) => item.id !== account.id),
@@ -141,9 +121,6 @@ function MailApp() {
     void queryClient.invalidateQueries({ queryKey: ['accounts'] });
     void queryClient.invalidateQueries({ queryKey: ['mailboxes'] });
     void queryClient.invalidateQueries({ queryKey: ['outbox'] });
-    if (shouldStartSync) {
-      void startSync(account.id).catch((error) => setSyncMessage(appErrorMessage(error)));
-    }
   };
 
   const handleRemoveAccount = async (accountId: string) => {

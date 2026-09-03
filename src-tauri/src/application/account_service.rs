@@ -279,7 +279,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{create_account_with_tester, AccountConnectionTester};
-    use crate::app_state::{AppState, SyncCoordinator};
+    use crate::app_state::{AppState, RealtimeSyncCoordinator, SyncCoordinator};
     use crate::auth::secret_store::{SecretStore, SecretStoreError};
     use crate::backends::incoming::{IncomingConfig, ServerCapabilities};
     use crate::backends::outgoing::OutgoingConfig;
@@ -482,6 +482,7 @@ mod tests {
             database: Mutex::new(Database::open_in_memory().expect("database")),
             secret_store: store,
             sync: Arc::new(SyncCoordinator::new()),
+            realtime: Arc::new(RealtimeSyncCoordinator::new()),
         }
     }
 

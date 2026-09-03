@@ -45,6 +45,12 @@ pub struct ImapIncomingBackend {
     session: tokio::sync::Mutex<Option<CachedImapSession>>,
 }
 
+/// A dedicated authenticated IMAP session for server push. It is intentionally separate from
+/// the bounded sync session so IDLE never blocks a foreground refresh or a queued mutation.
+pub struct ImapIdleConnection {
+    session: ImapSession<TlsStream<TcpStream>>,
+}
+
 impl ImapIncomingBackend {
     pub fn new(config: IncomingConfig) -> Self {
         Self {
@@ -70,6 +76,35 @@ impl ImapIncomingBackend {
             });
         }
         Ok(cached)
+    }
+
+    /// Opens one read-only INBOX selection and verifies that the server actually supports IDLE.
+    /// `INBOX` is the one mailbox every IMAP server must expose; a notification there triggers an
+    /// account-wide incremental sync, which also reconciles the remaining enabled folders.
+    pub async fn open_idle_connection(
+        &self,
+        secret: &str,
+    ) -> Result<ImapIdleConnection, IncomingError> {
+        let (mut session, _) = authenticate(&self.config, secret).await?;
+        let capabilities = read_capabilities(&mut session).await?;
+        if !capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("IDLE"))
+        {
+            return Err(IncomingError::Unsupported(
+                "IMAP server does not advertise IDLE".into(),
+            ));
+        }
+        select_mailbox(&mut session, "INBOX").await?;
+        Ok(ImapIdleConnection { session })
+    }
+}
+
+impl ImapIdleConnection {
+    /// Blocks until the selected mailbox changes or the caller's renewal deadline is reached.
+    /// A `false` result is only an IDLE renewal; it never causes an unnecessary message fetch.
+    pub async fn wait_for_change(&mut self, max_wait: Duration) -> Result<bool, IncomingError> {
+        self.session.idle_until_change(max_wait).await
     }
 }
 
@@ -286,17 +321,22 @@ where
         }
     }
 
+    fn next_command_tag(&mut self) -> Result<String, IncomingError> {
+        let tag = format!("A{:04}", self.next_tag);
+        self.next_tag = self
+            .next_tag
+            .checked_add(1)
+            .ok_or_else(|| IncomingError::Protocol("IMAP command tag exhausted".into()))?;
+        Ok(tag)
+    }
+
     async fn execute(
         &mut self,
         command: &str,
         response_limit: usize,
         authentication_command: bool,
     ) -> Result<CommandResult, IncomingError> {
-        let tag = format!("A{:04}", self.next_tag);
-        self.next_tag = self
-            .next_tag
-            .checked_add(1)
-            .ok_or_else(|| IncomingError::Protocol("IMAP command tag exhausted".into()))?;
+        let tag = self.next_command_tag()?;
         let wire = format!("{tag} {command}\r\n");
         timeout(COMMAND_TIMEOUT, async {
             self.stream.write_all(wire.as_bytes()).await?;
@@ -389,6 +429,174 @@ where
         }
     }
 
+    /// Implements the RFC 2177 IDLE handshake. The caller gives IDLE a finite renewal deadline
+    /// (typically below the server's 29-minute limit); renewal is connection maintenance only,
+    /// while a matching unsolicited mailbox response returns `true` and triggers a delta sync.
+    async fn idle_until_change(&mut self, max_wait: Duration) -> Result<bool, IncomingError> {
+        let tag = self.next_command_tag()?;
+        let wire = format!("{tag} IDLE\r\n");
+        timeout(COMMAND_TIMEOUT, async {
+            self.stream.write_all(wire.as_bytes()).await?;
+            self.stream.flush().await
+        })
+        .await
+        .map_err(|_| IncomingError::Network("IMAP IDLE command timed out".into()))?
+        .map_err(|error| IncomingError::Network(error.to_string()))?;
+
+        let continuation_deadline = Instant::now() + COMMAND_TIMEOUT;
+        let mut changed = false;
+        loop {
+            let remaining = continuation_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(IncomingError::Network(
+                    "IMAP IDLE continuation timed out".into(),
+                ));
+            }
+            let (response, _) = timeout(remaining, self.read_response(CONTROL_RESPONSE_LIMIT))
+                .await
+                .map_err(|_| IncomingError::Network("IMAP IDLE continuation timed out".into()))??;
+            match response {
+                Response::Continue { .. } => break,
+                Response::Done {
+                    tag: response_tag,
+                    status,
+                    information,
+                    ..
+                } => {
+                    return idle_completion(
+                        &tag,
+                        response_tag.0.as_str(),
+                        status,
+                        information,
+                        changed,
+                    )
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    information,
+                    ..
+                } => {
+                    return Err(IncomingError::Network(
+                        information
+                            .map(|value| value.into_owned())
+                            .unwrap_or_else(|| "IMAP server closed the IDLE session".into()),
+                    ));
+                }
+                response => changed |= response_indicates_mailbox_change(&response),
+            }
+        }
+
+        if changed {
+            return self.finish_idle(&tag, true).await;
+        }
+
+        let idle_deadline = Instant::now() + max_wait;
+        loop {
+            let remaining = idle_deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return self.finish_idle(&tag, false).await;
+            }
+            let (response, _) = timeout(remaining, self.read_response(CONTROL_RESPONSE_LIMIT))
+                .await
+                .map_err(|_| IncomingError::Network("IMAP IDLE response timed out".into()))??;
+            match response {
+                Response::Done {
+                    tag: response_tag,
+                    status,
+                    information,
+                    ..
+                } => {
+                    return idle_completion(
+                        &tag,
+                        response_tag.0.as_str(),
+                        status,
+                        information,
+                        changed,
+                    )
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    information,
+                    ..
+                } => {
+                    return Err(IncomingError::Network(
+                        information
+                            .map(|value| value.into_owned())
+                            .unwrap_or_else(|| "IMAP server closed the IDLE session".into()),
+                    ));
+                }
+                Response::Continue { .. } => {
+                    return Err(IncomingError::Protocol(
+                        "unexpected second IMAP IDLE continuation".into(),
+                    ));
+                }
+                response if response_indicates_mailbox_change(&response) => {
+                    changed = true;
+                    return self.finish_idle(&tag, changed).await;
+                }
+                // Providers commonly send an unsolicited `* OK` keepalive while idling. It is
+                // not a mailbox mutation, so keep the same socket blocked instead of syncing.
+                _ => {}
+            }
+        }
+    }
+
+    async fn finish_idle(&mut self, tag: &str, mut changed: bool) -> Result<bool, IncomingError> {
+        timeout(COMMAND_TIMEOUT, async {
+            self.stream.write_all(b"DONE\r\n").await?;
+            self.stream.flush().await
+        })
+        .await
+        .map_err(|_| IncomingError::Network("IMAP IDLE termination timed out".into()))?
+        .map_err(|error| IncomingError::Network(error.to_string()))?;
+
+        let deadline = Instant::now() + COMMAND_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(IncomingError::Network(
+                    "IMAP IDLE termination timed out".into(),
+                ));
+            }
+            let (response, _) = timeout(remaining, self.read_response(CONTROL_RESPONSE_LIMIT))
+                .await
+                .map_err(|_| IncomingError::Network("IMAP IDLE termination timed out".into()))??;
+            match response {
+                Response::Done {
+                    tag: response_tag,
+                    status,
+                    information,
+                    ..
+                } => {
+                    return idle_completion(
+                        tag,
+                        response_tag.0.as_str(),
+                        status,
+                        information,
+                        changed,
+                    )
+                }
+                Response::Data {
+                    status: Status::Bye,
+                    information,
+                    ..
+                } => {
+                    return Err(IncomingError::Network(
+                        information
+                            .map(|value| value.into_owned())
+                            .unwrap_or_else(|| "IMAP server closed the IDLE session".into()),
+                    ));
+                }
+                Response::Continue { .. } => {
+                    return Err(IncomingError::Protocol(
+                        "unexpected IMAP continuation while ending IDLE".into(),
+                    ));
+                }
+                response => changed |= response_indicates_mailbox_change(&response),
+            }
+        }
+    }
+
     /// Executes APPEND using a synchronizing literal. The message slice is
     /// written byte-for-byte only after the server sends a `+` continuation;
     /// the trailing CRLF terminates the IMAP command and is not part of the
@@ -405,11 +613,7 @@ where
                 MAX_APPEND_BYTES / (1024 * 1024)
             )));
         }
-        let tag = format!("A{:04}", self.next_tag);
-        self.next_tag = self
-            .next_tag
-            .checked_add(1)
-            .ok_or_else(|| IncomingError::Protocol("IMAP command tag exhausted".into()))?;
+        let tag = self.next_command_tag()?;
         let flags = if mark_seen { " (\\Seen)" } else { "" };
         let prefix = format!(
             "{tag} APPEND {}{flags} {{{}}}\r\n",
@@ -640,6 +844,49 @@ where
             ))
         }
     }
+}
+
+fn idle_completion(
+    expected_tag: &str,
+    response_tag: &str,
+    status: Status,
+    information: Option<std::borrow::Cow<'static, str>>,
+    changed: bool,
+) -> Result<bool, IncomingError> {
+    if response_tag != expected_tag {
+        return Err(IncomingError::Protocol(format!(
+            "IMAP returned unexpected tagged response {response_tag} while waiting for {expected_tag}"
+        )));
+    }
+    match status {
+        Status::Ok => Ok(changed),
+        Status::No | Status::Bad => Err(IncomingError::Protocol(
+            information
+                .map(|value| value.into_owned())
+                .unwrap_or_else(|| "IMAP IDLE was rejected".into()),
+        )),
+        Status::Bye | Status::PreAuth => Err(IncomingError::Network(
+            "IMAP server ended the IDLE session".into(),
+        )),
+    }
+}
+
+fn response_indicates_mailbox_change(response: &Response<'_>) -> bool {
+    matches!(
+        response,
+        Response::Expunge(_)
+            | Response::Vanished { .. }
+            | Response::Fetch(_, _)
+            | Response::MailboxData(MailboxDatum::Exists(_) | MailboxDatum::Recent(_))
+            | Response::Data {
+                code: Some(
+                    ResponseCode::UidNext(_)
+                        | ResponseCode::UidValidity(_)
+                        | ResponseCode::Unseen(_)
+                ),
+                ..
+            }
+    )
 }
 
 fn command_name(command: &str) -> String {
@@ -1929,6 +2176,39 @@ mod tests {
                 .await,
             Err(IncomingError::Protocol(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn idle_wakes_only_for_a_mailbox_change_and_ends_cleanly() {
+        let stream =
+            MockStream::new(b"+ idling\r\n* 3 EXISTS\r\nA0001 OK IDLE terminated\r\n".to_vec());
+        let writes = Arc::clone(&stream.output);
+        let mut session = ImapSession::new(stream);
+
+        assert!(session
+            .idle_until_change(Duration::from_secs(1))
+            .await
+            .expect("IDLE mailbox event"));
+        let commands = String::from_utf8(writes.lock().expect("mock output lock").clone())
+            .expect("utf-8 commands");
+        assert_eq!(commands, "A0001 IDLE\r\nDONE\r\n");
+    }
+
+    #[tokio::test]
+    async fn idle_ignores_keepalive_without_triggering_a_sync() {
+        let stream = MockStream::new(
+            b"+ idling\r\n* OK Still here\r\nA0001 OK server ended IDLE\r\n".to_vec(),
+        );
+        let writes = Arc::clone(&stream.output);
+        let mut session = ImapSession::new(stream);
+
+        assert!(!session
+            .idle_until_change(Duration::from_secs(1))
+            .await
+            .expect("IDLE keepalive"));
+        let commands = String::from_utf8(writes.lock().expect("mock output lock").clone())
+            .expect("utf-8 commands");
+        assert_eq!(commands, "A0001 IDLE\r\n");
     }
 
     #[tokio::test]

@@ -1135,6 +1135,12 @@ impl Database {
         self.set_account_sync_metadata(account_id, "idle", None, false)
     }
 
+    /// The persisted cache remains usable while the listener reconnects, so distinguish a
+    /// transient realtime transport loss from an authentication or data-sync failure.
+    pub fn mark_account_sync_offline(&mut self, account_id: &str) -> Result<(), AppError> {
+        self.set_account_sync_metadata(account_id, "offline", None, false)
+    }
+
     pub fn mark_account_sync_failed(
         &mut self,
         account_id: &str,

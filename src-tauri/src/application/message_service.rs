@@ -229,7 +229,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::fetch_message_body_with;
-    use crate::app_state::{AppState, SyncCoordinator};
+    use crate::app_state::{AppState, RealtimeSyncCoordinator, SyncCoordinator};
     use crate::auth::secret_store::{SecretStore, SecretStoreError};
     use crate::backends::incoming::{IncomingMessage, IncomingMessageFetch};
     use crate::domain::account::CreateAccountInput;
@@ -333,6 +333,7 @@ mod tests {
                 database: Mutex::new(database),
                 secret_store: Arc::new(TestSecretStore),
                 sync: Arc::new(SyncCoordinator::new()),
+                realtime: Arc::new(RealtimeSyncCoordinator::new()),
             },
             message_id,
             mailbox_id,
