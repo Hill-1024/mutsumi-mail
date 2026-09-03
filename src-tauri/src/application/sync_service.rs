@@ -784,9 +784,7 @@ async fn fetch_snapshot<B: IncomingMailBackend + ?Sized>(
 
     let cursor_invalidated =
         plan.expected_uid_validity.is_some() && snapshot.uid_validity != plan.expected_uid_validity;
-    let small_mailbox_needs_reconciliation =
-        plan.since_uid.is_some() && snapshot.total_count <= MAX_FETCH_MESSAGES;
-    if cursor_invalidated || small_mailbox_needs_reconciliation {
+    if cursor_invalidated {
         // UIDs may be reused after UIDVALIDITY changes. Re-fetch a bounded recent window without
         // the old cursor, then let the database atomically invalidate the stale instances.
         snapshot = backend
@@ -1260,13 +1258,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn small_mailbox_gets_a_complete_reconciliation_snapshot() {
+    async fn existing_small_mailbox_defers_reconciliation_to_the_uid_index() {
         let mut incremental = snapshot(7);
         incremental.total_count = 3;
-        let mut full = incremental.clone();
-        full.coverage_complete = true;
         let backend = FakeBackend {
-            snapshots: Mutex::new(VecDeque::from([incremental, full])),
+            snapshots: Mutex::new(VecDeque::from([incremental])),
             requested_cursors: Mutex::new(Vec::new()),
             requested_before_uids: Mutex::new(Vec::new()),
         };
@@ -1282,10 +1278,10 @@ mod tests {
         )
         .await
         .expect("snapshot");
-        assert!(fetched.complete_mailbox);
+        assert!(!fetched.complete_mailbox);
         assert_eq!(
             *backend.requested_cursors.lock().expect("cursor lock"),
-            vec![Some(41), None]
+            vec![Some(41)]
         );
     }
 

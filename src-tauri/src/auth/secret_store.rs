@@ -58,32 +58,31 @@ impl Default for PlatformSecretStore {
 
 impl SecretStore for PlatformSecretStore {
     fn set(&self, reference: &str, secret: &str) -> Result<(), SecretStoreError> {
+        // Serialize every platform keyring operation. macOS may show an authorization
+        // dialog while an item is being read; allowing concurrent cache misses here can
+        // turn one required confirmation into a burst of identical dialogs.
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| SecretStoreError::OperationFailed)?;
         self.entry(reference)?
             .set_password(secret)
             .map_err(|_error| SecretStoreError::OperationFailed)?;
-        self.cache
-            .lock()
-            .map_err(|_| SecretStoreError::OperationFailed)?
-            .insert(reference.to_owned(), secret.to_owned());
+        cache.insert(reference.to_owned(), secret.to_owned());
         Ok(())
     }
     fn get(&self, reference: &str) -> Result<String, SecretStoreError> {
-        if let Some(secret) = self
+        let mut cache = self
             .cache
             .lock()
-            .map_err(|_| SecretStoreError::OperationFailed)?
-            .get(reference)
-            .cloned()
-        {
+            .map_err(|_| SecretStoreError::OperationFailed)?;
+        if let Some(secret) = cache.get(reference).cloned() {
             return Ok(secret);
         }
 
         match self.entry(reference)?.get_password() {
             Ok(secret) => {
-                self.cache
-                    .lock()
-                    .map_err(|_| SecretStoreError::OperationFailed)?
-                    .insert(reference.to_owned(), secret.clone());
+                cache.insert(reference.to_owned(), secret.clone());
                 Ok(secret)
             }
             Err(error) if error.to_string().to_ascii_lowercase().contains("not found") => {
@@ -93,16 +92,17 @@ impl SecretStore for PlatformSecretStore {
         }
     }
     fn delete(&self, reference: &str) -> Result<(), SecretStoreError> {
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| SecretStoreError::OperationFailed)?;
         let result = match self.entry(reference)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(error) if error.to_string().to_ascii_lowercase().contains("not found") => Ok(()),
             Err(_) => Err(SecretStoreError::OperationFailed),
         };
         if result.is_ok() {
-            self.cache
-                .lock()
-                .map_err(|_| SecretStoreError::OperationFailed)?
-                .remove(reference);
+            cache.remove(reference);
         }
         result
     }

@@ -222,9 +222,14 @@ async fn create_account_with_tester(
 
     let id_hint = uuid::Uuid::new_v4().to_string();
     let incoming_ref = format!("account/{id_hint}/incoming");
-    let outgoing_ref = format!("account/{id_hint}/outgoing");
     let incoming_enabled = input.incoming.is_some();
     let outgoing_enabled = input.outgoing.is_some();
+    let shared_secret = incoming_enabled && outgoing_enabled && incoming_secret == outgoing_secret;
+    let outgoing_ref = if shared_secret {
+        incoming_ref.clone()
+    } else {
+        format!("account/{id_hint}/outgoing")
+    };
 
     if incoming_enabled {
         state
@@ -232,7 +237,7 @@ async fn create_account_with_tester(
             .set(&incoming_ref, incoming_secret)
             .map_err(|error| AppError::SecretStore(error.to_string()))?;
     }
-    if outgoing_enabled {
+    if outgoing_enabled && !shared_secret {
         if let Err(error) = state.secret_store.set(&outgoing_ref, outgoing_secret) {
             if incoming_enabled {
                 let _ = state.secret_store.delete(&incoming_ref);
@@ -260,7 +265,7 @@ async fn create_account_with_tester(
             if incoming_enabled {
                 let _ = state.secret_store.delete(&incoming_ref);
             }
-            if outgoing_enabled {
+            if outgoing_enabled && !shared_secret {
                 let _ = state.secret_store.delete(&outgoing_ref);
             }
             Err(error)
@@ -550,14 +555,16 @@ mod tests {
         assert_eq!(account.email, "person@qq.com");
         assert_eq!(
             *events.lock().expect("event lock"),
-            [
-                "probe:incoming",
-                "probe:outgoing",
-                "secret:set",
-                "secret:set"
-            ]
+            ["probe:incoming", "probe:outgoing", "secret:set"]
         );
-        assert_eq!(store.values.lock().expect("secret lock").len(), 2);
+        assert_eq!(store.values.lock().expect("secret lock").len(), 1);
+        let (incoming_ref, outgoing_ref) = state
+            .database
+            .lock()
+            .expect("database lock")
+            .account_secret_refs(&account.id)
+            .expect("secret refs");
+        assert_eq!(incoming_ref, outgoing_ref);
         assert_eq!(
             state
                 .database
@@ -617,7 +624,7 @@ mod tests {
 
         assert!(matches!(error, AppError::InvalidConfiguration(_)));
         assert!(events.lock().expect("event lock").is_empty());
-        assert_eq!(store.values.lock().expect("secret lock").len(), 2);
+        assert_eq!(store.values.lock().expect("secret lock").len(), 1);
         assert_eq!(
             state
                 .database
@@ -651,8 +658,6 @@ mod tests {
                 "probe:incoming",
                 "probe:outgoing",
                 "secret:set",
-                "secret:set",
-                "secret:delete",
                 "secret:delete"
             ]
         );
@@ -680,7 +685,9 @@ mod tests {
             fail_outgoing: false,
         };
 
-        let error = create_account_with_tester(&state, qq_input(), &tester)
+        let mut input = qq_input();
+        input.outgoing_secret = Some("different-outgoing-code".into());
+        let error = create_account_with_tester(&state, input, &tester)
             .await
             .expect_err("second keyring write must fail");
 
@@ -703,5 +710,32 @@ mod tests {
             .list_accounts()
             .expect("accounts")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn distinct_incoming_and_outgoing_credentials_use_distinct_keyring_items() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(MemorySecretStore::with_events(events.clone()));
+        let state = state_with_store(store.clone());
+        let tester = StubConnectionTester {
+            events: events.clone(),
+            fail_incoming: false,
+            fail_outgoing: false,
+        };
+        let mut input = qq_input();
+        input.outgoing_secret = Some("different-outgoing-code".into());
+
+        let account = create_account_with_tester(&state, input, &tester)
+            .await
+            .expect("account creation");
+
+        assert_eq!(store.values.lock().expect("secret lock").len(), 2);
+        let (incoming_ref, outgoing_ref) = state
+            .database
+            .lock()
+            .expect("database lock")
+            .account_secret_refs(&account.id)
+            .expect("secret refs");
+        assert_ne!(incoming_ref, outgoing_ref);
     }
 }

@@ -80,7 +80,7 @@ export function ComposeDialog({
 
   // Auto-save draft
   useEffect(() => {
-    if (status === 'saving') return undefined;
+    if (status !== 'idle') return undefined;
     const timer = window.setTimeout(() => {
       if (isDirty && selectedSenderId) {
         if (watchedValues.bodyText || watchedValues.subject) {

@@ -1869,6 +1869,18 @@ impl Database {
             )
             .map_err(AppError::from)?;
         }
+        if let Some(source_draft_id) = input.id.as_deref() {
+            // Sending moves the editable draft into an immutable outbox snapshot. Delete
+            // the source only when it belongs to this account and no existing queue item
+            // still owns it; both changes commit together.
+            tx.execute(
+                "DELETE FROM drafts
+                 WHERE id=? AND account_id=?
+                   AND NOT EXISTS (SELECT 1 FROM outbox WHERE draft_id=drafts.id)",
+                params![source_draft_id, input.account_id],
+            )
+            .map_err(AppError::from)?;
+        }
         tx.commit().map_err(AppError::from)?;
         Ok(outbox_id)
     }
@@ -3924,6 +3936,87 @@ mod tests {
         assert!(database
             .set_outbox_state(&outbox_id, "queued", None, None)
             .is_err());
+    }
+
+    #[test]
+    fn queueing_saved_draft_removes_editable_source_and_keeps_immutable_snapshot() {
+        let mut database = Database::open_in_memory().expect("migration");
+        let preset = provider_presets()
+            .into_iter()
+            .find(|item| item.id == "qq")
+            .expect("preset");
+        let account = database
+            .create_account(
+                &CreateAccountInput {
+                    email: "draft@qq.com".into(),
+                    display_name: "Draft".into(),
+                    provider_id: "qq".into(),
+                    secret: "not persisted".into(),
+                    incoming_secret: None,
+                    outgoing_secret: None,
+                    incoming: None,
+                    outgoing: None,
+                },
+                &preset,
+                "account/draft/incoming",
+                "account/draft/outgoing",
+                true,
+                true,
+            )
+            .expect("account");
+        let mut input = DraftInput {
+            id: None,
+            account_id: account.id,
+            to: "recipient@example.com".into(),
+            cc: None,
+            bcc: None,
+            subject: "Move draft".into(),
+            body_text: "Immutable body".into(),
+            in_reply_to: None,
+            references: None,
+        };
+        let editable_id = database.save_draft(&input).expect("save editable draft");
+        input.id = Some(editable_id.clone());
+        let payload = PreparedOutboxPayload {
+            envelope_from: "draft@qq.com".into(),
+            recipients: vec!["recipient@example.com".into()],
+            mime: b"Message-ID: <draft@qq.com>\r\n\r\nImmutable body\r\n".to_vec(),
+            rfc_message_id: "<draft@qq.com>".into(),
+            sent_copy_state: "not_started".into(),
+            sent_copy_error_message: None,
+            sent_copy_uid_validity: None,
+            sent_copy_uid: None,
+        };
+
+        let outbox_id = database
+            .queue_prepared_draft(&input, &payload)
+            .expect("queue saved draft");
+
+        let editable_count: i64 = database
+            .connection
+            .query_row(
+                "SELECT count(*) FROM drafts WHERE id=?",
+                [&editable_id],
+                |row| row.get(0),
+            )
+            .expect("editable draft count");
+        assert_eq!(editable_count, 0);
+        let immutable_id: String = database
+            .connection
+            .query_row(
+                "SELECT draft_id FROM outbox WHERE id=?",
+                [&outbox_id],
+                |row| row.get(0),
+            )
+            .expect("immutable draft id");
+        assert_ne!(immutable_id, editable_id);
+        let snapshot = database.outbox_draft(&outbox_id).expect("outbox draft");
+        assert_eq!(snapshot.subject, "Move draft");
+        assert_eq!(snapshot.body_text, "Immutable body");
+        assert_eq!(
+            database.outbox_payload(&outbox_id).expect("payload"),
+            Some(payload)
+        );
     }
 
     #[test]

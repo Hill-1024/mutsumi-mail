@@ -39,11 +39,37 @@ const MESSAGE_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.P
 
 pub struct ImapIncomingBackend {
     pub config: IncomingConfig,
+    // One backend instance represents one account operation. Keeping its authenticated
+    // session alive avoids a burst of LOGIN commands while a sync walks every mailbox;
+    // some providers throttle those reconnects and then leave later UID commands hanging.
+    session: tokio::sync::Mutex<Option<CachedImapSession>>,
 }
 
 impl ImapIncomingBackend {
     pub fn new(config: IncomingConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            session: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    async fn authenticated_session(
+        &self,
+        secret: &str,
+    ) -> Result<tokio::sync::MutexGuard<'_, Option<CachedImapSession>>, IncomingError> {
+        let mut cached = self.session.lock().await;
+        if cached
+            .as_ref()
+            .is_none_or(|existing| existing.secret != secret)
+        {
+            cached.take();
+            let (session, _) = authenticate(&self.config, secret).await?;
+            *cached = Some(CachedImapSession {
+                secret: secret.to_owned(),
+                session,
+            });
+        }
+        Ok(cached)
     }
 }
 
@@ -84,9 +110,16 @@ impl IncomingMailBackend for ImapIncomingBackend {
         &self,
         secret: &str,
     ) -> Result<Vec<IncomingMailbox>, IncomingError> {
-        let (mut session, _) = authenticate(&self.config, secret).await?;
-        let result = list_mailboxes_on_session(&mut session).await;
-        let _ = session.logout().await;
+        let mut cached = self.authenticated_session(secret).await?;
+        let result = match cached.as_mut() {
+            Some(cached) => list_mailboxes_on_session(&mut cached.session).await,
+            None => Err(IncomingError::Protocol(
+                "IMAP session cache was unexpectedly empty".into(),
+            )),
+        };
+        if result.is_err() {
+            cached.take();
+        }
         result
     }
 
@@ -97,9 +130,18 @@ impl IncomingMailBackend for ImapIncomingBackend {
         since_uid: Option<u32>,
         limit: u32,
     ) -> Result<IncomingMailboxSnapshot, IncomingError> {
-        let (mut session, _) = authenticate(&self.config, secret).await?;
-        let result = fetch_messages_on_session(&mut session, mailbox, since_uid, limit).await;
-        let _ = session.logout().await;
+        let mut cached = self.authenticated_session(secret).await?;
+        let result = match cached.as_mut() {
+            Some(cached) => {
+                fetch_messages_on_session(&mut cached.session, mailbox, since_uid, limit).await
+            }
+            None => Err(IncomingError::Protocol(
+                "IMAP session cache was unexpectedly empty".into(),
+            )),
+        };
+        if result.is_err() {
+            cached.take();
+        }
         result
     }
 
@@ -110,10 +152,19 @@ impl IncomingMailBackend for ImapIncomingBackend {
         before_uid: u32,
         limit: u32,
     ) -> Result<IncomingMailboxSnapshot, IncomingError> {
-        let (mut session, _) = authenticate(&self.config, secret).await?;
-        let result =
-            fetch_messages_before_on_session(&mut session, mailbox, before_uid, limit).await;
-        let _ = session.logout().await;
+        let mut cached = self.authenticated_session(secret).await?;
+        let result = match cached.as_mut() {
+            Some(cached) => {
+                fetch_messages_before_on_session(&mut cached.session, mailbox, before_uid, limit)
+                    .await
+            }
+            None => Err(IncomingError::Protocol(
+                "IMAP session cache was unexpectedly empty".into(),
+            )),
+        };
+        if result.is_err() {
+            cached.take();
+        }
         result
     }
 
@@ -123,9 +174,16 @@ impl IncomingMailBackend for ImapIncomingBackend {
         mailbox: &str,
         uid: u32,
     ) -> Result<Option<IncomingMessageFetch>, IncomingError> {
-        let (mut session, _) = authenticate(&self.config, secret).await?;
-        let result = fetch_message_on_session(&mut session, mailbox, uid).await;
-        let _ = session.logout().await;
+        let mut cached = self.authenticated_session(secret).await?;
+        let result = match cached.as_mut() {
+            Some(cached) => fetch_message_on_session(&mut cached.session, mailbox, uid).await,
+            None => Err(IncomingError::Protocol(
+                "IMAP session cache was unexpectedly empty".into(),
+            )),
+        };
+        if result.is_err() {
+            cached.take();
+        }
         result
     }
 
@@ -134,9 +192,16 @@ impl IncomingMailBackend for ImapIncomingBackend {
         secret: &str,
         mailbox: &str,
     ) -> Result<IncomingMailboxIndex, IncomingError> {
-        let (mut session, _) = authenticate(&self.config, secret).await?;
-        let result = fetch_mailbox_index_on_session(&mut session, mailbox).await;
-        let _ = session.logout().await;
+        let mut cached = self.authenticated_session(secret).await?;
+        let result = match cached.as_mut() {
+            Some(cached) => fetch_mailbox_index_on_session(&mut cached.session, mailbox).await,
+            None => Err(IncomingError::Protocol(
+                "IMAP session cache was unexpectedly empty".into(),
+            )),
+        };
+        if result.is_err() {
+            cached.take();
+        }
         result
     }
 
@@ -145,11 +210,26 @@ impl IncomingMailBackend for ImapIncomingBackend {
         secret: &str,
         operation: &RemoteMessageOperation,
     ) -> Result<(), IncomingError> {
-        let (mut session, _) = authenticate(&self.config, secret).await?;
-        let capability_names = read_capabilities(&mut session).await?;
-        let result =
-            apply_remote_operation_on_session(&mut session, &capability_names, operation).await;
-        let _ = session.logout().await;
+        let mut cached = self.authenticated_session(secret).await?;
+        let result = match cached.as_mut() {
+            Some(cached) => match read_capabilities(&mut cached.session).await {
+                Ok(capability_names) => {
+                    apply_remote_operation_on_session(
+                        &mut cached.session,
+                        &capability_names,
+                        operation,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            },
+            None => Err(IncomingError::Protocol(
+                "IMAP session cache was unexpectedly empty".into(),
+            )),
+        };
+        if result.is_err() {
+            cached.take();
+        }
         result
     }
 
@@ -160,11 +240,27 @@ impl IncomingMailBackend for ImapIncomingBackend {
         raw_rfc822: &[u8],
         mark_seen: bool,
     ) -> Result<AppendMessageResult, IncomingError> {
-        let (mut session, _) = authenticate(&self.config, secret).await?;
-        let result = append_message_on_session(&mut session, mailbox, raw_rfc822, mark_seen).await;
-        let _ = session.logout().await;
+        let mut cached = self.authenticated_session(secret).await?;
+        let result = match cached.as_mut() {
+            Some(cached) => {
+                append_message_on_session(&mut cached.session, mailbox, raw_rfc822, mark_seen).await
+            }
+            None => Err(IncomingError::Protocol(
+                "IMAP session cache was unexpectedly empty".into(),
+            )),
+        };
+        if result.is_err() {
+            cached.take();
+        }
         result
     }
+}
+
+struct CachedImapSession {
+    // Retained only for the lifetime of this backend so a caller cannot accidentally reuse an
+    // authenticated connection after changing credentials. This type has no Debug output.
+    secret: String,
+    session: ImapSession<TlsStream<TcpStream>>,
 }
 
 struct CommandResult {
@@ -546,8 +642,13 @@ where
     }
 }
 
-fn command_name(command: &str) -> &str {
-    command.split_ascii_whitespace().next().unwrap_or("command")
+fn command_name(command: &str) -> String {
+    let mut parts = command.split_ascii_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("UID"), Some(operation)) => format!("UID {operation}"),
+        (Some(operation), _) => operation.to_owned(),
+        (None, _) => "command".into(),
+    }
 }
 
 async fn authenticate(
@@ -918,24 +1019,71 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Debug + Send,
 {
     let selected = select_mailbox(session, mailbox).await?;
-    let all_uids = search_uids_with_limit(session, "ALL", MAILBOX_INDEX_RESPONSE_LIMIT).await?;
-    let all_uid_set = all_uids.iter().copied().collect::<HashSet<_>>();
-    let mut unseen_uids =
-        search_uids_with_limit(session, "UNSEEN", MAILBOX_INDEX_RESPONSE_LIMIT).await?;
-    let mut flagged_uids =
-        search_uids_with_limit(session, "FLAGGED", MAILBOX_INDEX_RESPONSE_LIMIT).await?;
-    let confirmed_all_uids =
-        search_uids_with_limit(session, "ALL", MAILBOX_INDEX_RESPONSE_LIMIT).await?;
-    if confirmed_all_uids != all_uids {
+    if selected.total_count == 0 {
+        return Ok(IncomingMailboxIndex {
+            remote_id: mailbox.to_owned(),
+            uid_validity: selected.uid_validity,
+            total_count: 0,
+            all_uids: Vec::new(),
+            unseen_uids: Vec::new(),
+            flagged_uids: Vec::new(),
+        });
+    }
+    // Fetch UID and flags together so one tagged response is the authority for both
+    // membership and flag state. Use message sequence numbers for the full selected mailbox;
+    // the UID is still explicitly returned, while avoiding provider-specific UID FETCH stalls.
+    // Four separate SEARCH commands created race windows and triggered throttling when a sync
+    // walked several folders in quick succession.
+    let result = session
+        .execute("FETCH 1:* (UID FLAGS)", MAILBOX_INDEX_RESPONSE_LIMIT, false)
+        .await?;
+    let mut entries = Vec::new();
+    for response in result.responses {
+        let Response::Fetch(_, attributes) = response else {
+            continue;
+        };
+        let mut uid = None;
+        let mut flags = Vec::new();
+        for attribute in attributes {
+            match attribute {
+                AttributeValue::Uid(value) => uid = Some(value),
+                AttributeValue::Flags(values) => {
+                    flags = values.into_iter().map(|value| value.into_owned()).collect()
+                }
+                _ => {}
+            }
+        }
+        let uid = uid.ok_or_else(|| {
+            IncomingError::Protocol("IMAP mailbox index response omitted UID".into())
+        })?;
+        if uid == 0 {
+            return Err(IncomingError::Protocol(
+                "IMAP mailbox index returned the invalid UID 0".into(),
+            ));
+        }
+        entries.push((uid, flags));
+    }
+    entries.sort_unstable_by_key(|(uid, _)| *uid);
+    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err(IncomingError::Protocol(
-            "IMAP mailbox changed while building its UID index".into(),
+            "IMAP mailbox index returned a duplicate UID".into(),
         ));
     }
-
-    // A flag result can still race independently, so never let it introduce a
-    // UID outside the stable ALL set. Flag-only races converge on the next run.
-    unseen_uids.retain(|uid| all_uid_set.contains(uid));
-    flagged_uids.retain(|uid| all_uid_set.contains(uid));
+    let all_uids = entries.iter().map(|(uid, _)| *uid).collect::<Vec<_>>();
+    let unseen_uids = entries
+        .iter()
+        .filter(|(_, flags)| !flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen")))
+        .map(|(uid, _)| *uid)
+        .collect::<Vec<_>>();
+    let flagged_uids = entries
+        .iter()
+        .filter(|(_, flags)| {
+            flags
+                .iter()
+                .any(|flag| flag.eq_ignore_ascii_case("\\Flagged"))
+        })
+        .map(|(uid, _)| *uid)
+        .collect::<Vec<_>>();
     let total_count = u32::try_from(all_uids.len()).map_err(|_| {
         IncomingError::Protocol("IMAP mailbox UID index exceeded the supported count".into())
     })?;
@@ -1934,18 +2082,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mailbox_index_uses_search_all_as_authority_and_intersects_flags() {
-        let responses = b"* 2 EXISTS\r\n\
+    async fn mailbox_index_uses_one_uid_flags_fetch_as_authority() {
+        let responses = b"* 3 EXISTS\r\n\
                           * OK [UIDVALIDITY 22] valid\r\n\
                           A0001 OK examine\r\n\
-                          * SEARCH 4 2 2 9\r\n\
-                          A0002 OK all\r\n\
-                          * SEARCH 2 99\r\n\
-                          A0003 OK unseen\r\n\
-                          * SEARCH 4 77\r\n\
-                          A0004 OK flagged\r\n\
-                          * SEARCH 2 4 9\r\n\
-                          A0005 OK confirm all\r\n"
+                          * 1 FETCH (UID 4 FLAGS (\\Seen \\Flagged))\r\n\
+                          * 2 FETCH (UID 2 FLAGS ())\r\n\
+                          * 3 FETCH (UID 9 FLAGS (\\Seen))\r\n\
+                          A0002 OK flags complete\r\n"
             .to_vec();
         let stream = MockStream::new(responses);
         let writes = Arc::clone(&stream.output);
@@ -1962,28 +2106,36 @@ mod tests {
 
         let commands = String::from_utf8(writes.lock().expect("mock output lock").clone())
             .expect("utf-8 commands");
-        assert!(commands.contains("A0002 UID SEARCH ALL\r\n"));
-        assert!(commands.contains("A0003 UID SEARCH UNSEEN\r\n"));
-        assert!(commands.contains("A0004 UID SEARCH FLAGGED\r\n"));
-        assert!(commands.contains("A0005 UID SEARCH ALL\r\n"));
+        assert!(commands.contains("A0002 FETCH 1:* (UID FLAGS)\r\n"));
+        assert_eq!(commands.matches("FETCH 1:*").count(), 1);
 
-        let changed = b"* 2 EXISTS\r\n\
-                        * OK [UIDVALIDITY 22] valid\r\n\
-                        A0001 OK examine\r\n\
-                        * SEARCH 2 4\r\n\
-                        A0002 OK all\r\n\
-                        * SEARCH 2\r\n\
-                        A0003 OK unseen\r\n\
-                        * SEARCH 4\r\n\
-                        A0004 OK flagged\r\n\
-                        * SEARCH 2 4 9\r\n\
-                        A0005 OK changed all\r\n"
+        let duplicate = b"* 2 EXISTS\r\n\
+                          * OK [UIDVALIDITY 22] valid\r\n\
+                          A0001 OK examine\r\n\
+                          * 1 FETCH (UID 2 FLAGS ())\r\n\
+                          * 2 FETCH (UID 2 FLAGS (\\Seen))\r\n\
+                          A0002 OK flags complete\r\n"
             .to_vec();
-        let mut session = ImapSession::new(MockStream::new(changed));
+        let mut session = ImapSession::new(MockStream::new(duplicate));
         assert!(matches!(
             fetch_mailbox_index_on_session(&mut session, "INBOX").await,
             Err(IncomingError::Protocol(_))
         ));
+
+        let empty_stream = MockStream::new(
+            b"* 0 EXISTS\r\n* OK [UIDVALIDITY 23] valid\r\nA0001 OK examine\r\n".to_vec(),
+        );
+        let empty_writes = Arc::clone(&empty_stream.output);
+        let mut empty_session = ImapSession::new(empty_stream);
+        let empty = fetch_mailbox_index_on_session(&mut empty_session, "Empty")
+            .await
+            .expect("empty mailbox index");
+        assert!(empty.all_uids.is_empty());
+        assert!(
+            !String::from_utf8(empty_writes.lock().expect("mock output lock").clone())
+                .expect("utf-8 commands")
+                .contains("FETCH")
+        );
     }
 
     #[tokio::test]
