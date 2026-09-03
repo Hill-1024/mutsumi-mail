@@ -98,6 +98,21 @@ const providerPresets = vi.hoisted(() => ([
     capabilities: {},
     quirks: [],
   },
+  {
+    id: 'generic-smtp',
+    displayName: '通用 SMTP（仅发件）',
+    emailDomainPatterns: [],
+    outgoing: {
+      protocol: 'smtp',
+      host: '',
+      port: 465,
+      tlsMode: 'implicit',
+      authMethods: ['password'],
+    },
+    helpText: '手动填写 SMTP 发件端点。此账户只用于发件。',
+    capabilities: {},
+    quirks: ['仅发件'],
+  },
 ] satisfies ProviderPreset[]));
 
 vi.mock('../lib/tauri', () => ({
@@ -238,6 +253,50 @@ describe('邮箱账户关键流程', () => {
 
     await act(async () => { resolveCreate?.(savedAccount); });
     await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(onSaved).toHaveBeenCalledWith(savedAccount);
+  }, 15_000);
+
+  it('通用 SMTP 仅验证发件端点，不请求或保存收件配置', async () => {
+    const onSaved = vi.fn();
+    const savedAccount = account({
+      id: 'smtp-only-account',
+      providerId: 'generic-smtp',
+      email: 'sender@example.com',
+      incomingConfigured: false,
+      outgoingConfigured: true,
+    });
+    apiMocks.createAccount.mockResolvedValue(savedAccount);
+
+    render(<AccountWizard onClose={vi.fn()} onSaved={onSaved} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /通用 SMTP（仅发件）/ }));
+    expect(screen.queryByText('收件 IMAP')).toBeNull();
+    expect(screen.getByText('发件 SMTP')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'sender@example.com' } });
+    fireEvent.change(screen.getByLabelText('SMTP 密码或授权码'), { target: { value: 'smtp-secret' } });
+    fireEvent.change(screen.getByLabelText('服务器'), { target: { value: 'smtp.example.com' } });
+    fireEvent.change(screen.getByLabelText('端口'), { target: { value: '587' } });
+    fireEvent.change(screen.getByLabelText('用户名（可选）'), { target: { value: 'smtp-user' } });
+    fireEvent.change(screen.getByLabelText('TLS 模式'), { target: { value: 'starttls' } });
+    fireEvent.click(screen.getByRole('button', { name: '验证并添加' }));
+
+    await waitFor(() => expect(apiMocks.createAccount).toHaveBeenCalledWith({
+      email: 'sender@example.com',
+      displayName: 'sender',
+      providerId: 'generic-smtp',
+      secret: 'smtp-secret',
+      incomingSecret: undefined,
+      outgoingSecret: 'smtp-secret',
+      incoming: undefined,
+      outgoing: {
+        protocol: 'smtp',
+        host: 'smtp.example.com',
+        port: 587,
+        tlsMode: 'starttls',
+        authMethod: 'password',
+        username: 'smtp-user',
+      },
+    }));
     expect(onSaved).toHaveBeenCalledWith(savedAccount);
   }, 15_000);
 

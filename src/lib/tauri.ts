@@ -188,6 +188,13 @@ export const providerPresets: ProviderPreset[] = [
     quirks: [],
   },
   {
+    id: 'generic-smtp', displayName: '通用 SMTP（仅发件）', emailDomainPatterns: [],
+    outgoing: { protocol: 'smtp', host: '', port: 465, tlsMode: 'implicit', authMethods: ['password'] },
+    helpText: '手动填写 SMTP 发件端点。此账户只用于发件，不会收取邮件或同步“已发送”副本。',
+    capabilities: { smtpUtf8: true },
+    quirks: ['仅发件'],
+  },
+  {
     id: 'cloudflare-smtp', displayName: 'Cloudflare Email Sending', emailDomainPatterns: ['cloudflare.email'],
     outgoing: { protocol: 'smtp', host: 'smtp.mx.cloudflare.net', port: 465, tlsMode: 'implicit', authMethods: ['api-token'], username: 'api_token' },
     helpText: '这是 outbound-only 发件 preset，不是完整邮箱服务。用户名固定为 api_token，密码为具有 Email Sending: Edit 权限的 API Token。',

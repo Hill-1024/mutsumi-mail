@@ -1,6 +1,6 @@
 export type ThemeMode = 'dark' | 'light' | 'system';
 
-export type ProviderId = 'qq' | 'netease-163' | 'generic' | 'cloudflare-smtp';
+export type ProviderId = 'qq' | 'netease-163' | 'generic' | 'generic-smtp' | 'cloudflare-smtp';
 
 export type CapabilityName =
   | 'folders'

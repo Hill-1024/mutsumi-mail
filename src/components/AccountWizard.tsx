@@ -24,9 +24,34 @@ const accountSchema = z.object({
 type AccountForm = z.infer<typeof accountSchema>;
 type SubmitState = 'idle' | 'verifying' | 'error';
 
-const availableProviders = providerPresets.filter((preset) => (
-  preset.id === 'qq' || preset.id === 'netease-163' || preset.id === 'generic'
-));
+const availableProviderIds = new Set([
+  'qq',
+  'netease-163',
+  'generic',
+  'generic-smtp',
+  'cloudflare-smtp',
+]);
+
+const availableProviders = providerPresets.filter((preset) => availableProviderIds.has(preset.id));
+
+const isOutboundOnlyProvider = (provider: ProviderPreset) => !provider.incoming && Boolean(provider.outgoing);
+
+const providerIcon = (provider: ProviderPreset) => {
+  if (provider.id === 'generic') return 'settings' as const;
+  return isOutboundOnlyProvider(provider) ? 'send' as const : 'inbox' as const;
+};
+
+const providerChoiceDescription = (provider: ProviderPreset) => {
+  if (provider.id === 'generic') return '手动配置 IMAP 与 SMTP';
+  if (provider.id === 'generic-smtp') return '手动配置 SMTP，仅用于发件';
+  if (provider.id === 'cloudflare-smtp') return '固定 SMTP 端点，仅用于发件';
+  return '使用客户端授权码登录';
+};
+
+const providerDescription = (provider: ProviderPreset) => {
+  if (provider.id === 'generic') return 'IMAP 收件 + SMTP 发件';
+  return isOutboundOnlyProvider(provider) ? '仅 SMTP 发件，不收取或同步邮件' : '已选择邮箱服务';
+};
 
 const errorCode = (error: unknown) => (
   typeof error === 'object' && error && 'code' in error
@@ -117,7 +142,10 @@ export function AccountWizard({
 
     const email = values.email.trim();
     const secret = values.secret;
-    const isGeneric = provider.id === 'generic';
+    const isGenericMailbox = provider.id === 'generic';
+    const isGenericSmtp = provider.id === 'generic-smtp';
+    const hasManualOutgoing = isGenericMailbox || isGenericSmtp;
+    const isOutboundOnly = isOutboundOnlyProvider(provider);
     const incomingHost = values.incomingHost?.trim() ?? '';
     const outgoingHost = values.outgoingHost?.trim() ?? '';
     const incomingPort = parsePort(values.incomingPort);
@@ -125,19 +153,19 @@ export function AccountWizard({
     let hasEndpointError = false;
 
     clearErrors();
-    if (isGeneric && !incomingHost) {
+    if (isGenericMailbox && !incomingHost) {
       setError('incomingHost', { type: 'manual', message: '请输入 IMAP 服务器地址' });
       hasEndpointError = true;
     }
-    if (isGeneric && incomingPort === null) {
+    if (isGenericMailbox && incomingPort === null) {
       setError('incomingPort', { type: 'manual', message: '请输入 1–65535 之间的端口' });
       hasEndpointError = true;
     }
-    if (isGeneric && !outgoingHost) {
+    if (hasManualOutgoing && !outgoingHost) {
       setError('outgoingHost', { type: 'manual', message: '请输入 SMTP 服务器地址' });
       hasEndpointError = true;
     }
-    if (isGeneric && outgoingPort === null) {
+    if (hasManualOutgoing && outgoingPort === null) {
       setError('outgoingPort', { type: 'manual', message: '请输入 1–65535 之间的端口' });
       hasEndpointError = true;
     }
@@ -148,7 +176,7 @@ export function AccountWizard({
     }
 
     setSubmitState('verifying');
-    setStatus('正在验证收件与发件连接…');
+    setStatus(isOutboundOnly ? '正在验证 SMTP 发件连接…' : '正在验证收件与发件连接…');
     let account: Account;
     try {
       account = await createAccount({
@@ -156,9 +184,13 @@ export function AccountWizard({
         displayName: values.displayName?.trim() || defaultDisplayName || email,
         providerId: provider.id,
         secret,
-        incomingSecret: isGeneric ? secret : undefined,
-        outgoingSecret: isGeneric ? values.outgoingSecret || secret : undefined,
-        incoming: isGeneric && incomingPort !== null ? {
+        incomingSecret: isGenericMailbox ? secret : undefined,
+        outgoingSecret: isGenericMailbox
+          ? values.outgoingSecret || secret
+          : isGenericSmtp
+            ? secret
+            : undefined,
+        incoming: isGenericMailbox && incomingPort !== null ? {
           protocol: 'imap',
           host: incomingHost,
           port: incomingPort,
@@ -166,7 +198,7 @@ export function AccountWizard({
           authMethod: 'password',
           username: values.incomingUsername?.trim() || email,
         } : undefined,
-        outgoing: isGeneric && outgoingPort !== null ? {
+        outgoing: hasManualOutgoing && outgoingPort !== null ? {
           protocol: 'smtp',
           host: outgoingHost,
           port: outgoingPort,
@@ -221,7 +253,7 @@ export function AccountWizard({
         {step === 1 && (
           <div className="wizard-step">
             <h3>选择邮箱服务</h3>
-            <p className="helper-text">选择服务后输入邮箱地址和客户端授权码。其他服务请选择通用 IMAP + SMTP。</p>
+            <p className="helper-text">需要收发请选择 IMAP + SMTP；只发信请选择通用 SMTP。</p>
             <div role="group" aria-label="可用邮箱服务">
               {availableProviders.map((preset) => (
                 <button
@@ -230,10 +262,10 @@ export function AccountWizard({
                   type="button"
                   onClick={() => selectProvider(preset)}
                 >
-                  <span className="provider-logo"><Icon name={preset.id === 'generic' ? 'settings' : 'inbox'} size={20} /></span>
+                  <span className="provider-logo"><Icon name={providerIcon(preset)} size={20} /></span>
                   <span className="provider-choice-copy">
                     <strong>{preset.displayName}</strong>
-                    <span>{preset.id === 'generic' ? '手动配置 IMAP 与 SMTP' : '使用客户端授权码登录'}</span>
+                    <span>{providerChoiceDescription(preset)}</span>
                   </span>
                   <Icon name="chevron" size={20} />
                 </button>
@@ -246,10 +278,10 @@ export function AccountWizard({
         {step === 2 && provider && (
           <form className="wizard-step" onSubmit={handleSubmit(save, reportVisibleValidationErrors)} autoComplete="off" noValidate>
             <div className="provider-detected">
-              <div className="provider-logo"><Icon name={provider.id === 'generic' ? 'settings' : 'inbox'} size={20} /></div>
+              <div className="provider-logo"><Icon name={providerIcon(provider)} size={20} /></div>
               <div>
                 <strong>{provider.displayName}</strong>
-                <span>{provider.id === 'generic' ? 'IMAP 收件 + SMTP 发件' : '已选择邮箱服务'}</span>
+                <span>{providerDescription(provider)}</span>
               </div>
               <Icon name="checkCircle" size={22} />
             </div>
@@ -274,7 +306,13 @@ export function AccountWizard({
               {errors.displayName && <em>{errors.displayName.message}</em>}
             </label>
             <label className="form-field">
-              <span>{provider.id === 'qq' || provider.id === 'netease-163' ? '客户端授权码' : '密码或授权码'}</span>
+              <span>{provider.id === 'qq' || provider.id === 'netease-163'
+                ? '客户端授权码'
+                : provider.id === 'generic-smtp'
+                  ? 'SMTP 密码或授权码'
+                  : provider.id === 'cloudflare-smtp'
+                    ? 'Cloudflare API Token'
+                    : '密码或授权码'}</span>
               <input {...register('secret')} type="password" autoComplete="new-password" placeholder="仅保存到系统安全存储" disabled={isVerifying} aria-invalid={Boolean(errors.secret)} />
               {errors.secret && <em>{errors.secret.message}</em>}
             </label>
@@ -286,30 +324,34 @@ export function AccountWizard({
               </label>
             )}
 
-            {provider.id === 'generic' && (
+            {(provider.id === 'generic' || provider.id === 'generic-smtp') && (
               <div className="endpoint-grid">
-                <div className="endpoint-heading">收件 IMAP</div>
-                <label className="form-field">
-                  <span>服务器</span>
-                  <input {...register('incomingHost')} autoComplete="off" placeholder="imap.example.com" disabled={isVerifying} aria-invalid={Boolean(errors.incomingHost)} />
-                  {errors.incomingHost && <em>{errors.incomingHost.message}</em>}
-                </label>
-                <label className="form-field">
-                  <span>端口</span>
-                  <input {...register('incomingPort')} inputMode="numeric" disabled={isVerifying} aria-invalid={Boolean(errors.incomingPort)} />
-                  {errors.incomingPort && <em>{errors.incomingPort.message}</em>}
-                </label>
-                <label className="form-field">
-                  <span>用户名（可选）</span>
-                  <input {...register('incomingUsername')} autoComplete="off" placeholder="默认使用邮箱地址" disabled={isVerifying} />
-                </label>
-                <label className="form-field">
-                  <span>TLS 模式</span>
-                  <select {...register('incomingTlsMode')} disabled={isVerifying}>
-                    <option value="implicit">IMAPS（通常 993）</option>
-                    <option value="starttls">STARTTLS（通常 143）</option>
-                  </select>
-                </label>
+                {provider.id === 'generic' && (
+                  <>
+                    <div className="endpoint-heading">收件 IMAP</div>
+                    <label className="form-field">
+                      <span>服务器</span>
+                      <input {...register('incomingHost')} autoComplete="off" placeholder="imap.example.com" disabled={isVerifying} aria-invalid={Boolean(errors.incomingHost)} />
+                      {errors.incomingHost && <em>{errors.incomingHost.message}</em>}
+                    </label>
+                    <label className="form-field">
+                      <span>端口</span>
+                      <input {...register('incomingPort')} inputMode="numeric" disabled={isVerifying} aria-invalid={Boolean(errors.incomingPort)} />
+                      {errors.incomingPort && <em>{errors.incomingPort.message}</em>}
+                    </label>
+                    <label className="form-field">
+                      <span>用户名（可选）</span>
+                      <input {...register('incomingUsername')} autoComplete="off" placeholder="默认使用邮箱地址" disabled={isVerifying} />
+                    </label>
+                    <label className="form-field">
+                      <span>TLS 模式</span>
+                      <select {...register('incomingTlsMode')} disabled={isVerifying}>
+                        <option value="implicit">IMAPS（通常 993）</option>
+                        <option value="starttls">STARTTLS（通常 143）</option>
+                      </select>
+                    </label>
+                  </>
+                )}
 
                 <div className="endpoint-heading">发件 SMTP</div>
                 <label className="form-field">

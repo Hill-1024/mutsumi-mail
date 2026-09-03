@@ -46,6 +46,11 @@ pub fn provider_presets() -> Vec<ProviderPreset> {
             help_text: "为标准邮件服务器手动填写 IMAP 与 SMTP 端点。当前使用同一密码或授权码验证收发连接。".into(), capabilities: capabilities(true), quirks: vec![],
         },
         ProviderPreset {
+            id: "generic-smtp".into(), display_name: "通用 SMTP（仅发件）".into(), email_domain_patterns: vec![],
+            incoming: None, outgoing: Some(EndpointPreset { protocol: "smtp".into(), host: String::new(), port: 465, tls_mode: "implicit".into(), auth_methods: vec!["password".into()], username: None }),
+            help_text: "手动填写 SMTP 发件端点。此账户只用于发件，不会收取邮件或同步“已发送”副本。".into(), capabilities: ProviderCapabilities { smtp_utf8: true, ..Default::default() }, quirks: vec!["仅发件".into()],
+        },
+        ProviderPreset {
             id: "cloudflare-smtp".into(), display_name: "Cloudflare Email Sending".into(), email_domain_patterns: vec!["cloudflare.email".into()],
             incoming: None, outgoing: Some(EndpointPreset { protocol: "smtp".into(), host: "smtp.mx.cloudflare.net".into(), port: 465, tls_mode: "implicit".into(), auth_methods: vec!["api-token".into()], username: Some("api_token".into()) }),
             help_text: "这是 outbound-only 发件 preset。Cloudflare SMTP 用户名固定为 api_token，密码为具有 Email Sending: Edit 权限的 API Token。".into(), capabilities: ProviderCapabilities { smtp_utf8: true, ..Default::default() }, quirks: vec!["仅发件".into(), "SMTP implicit TLS 465".into()],
@@ -132,5 +137,18 @@ mod tests {
             .and_then(|provider| provider.outgoing)
             .expect("outgoing preset");
         assert_eq!(outgoing.username.as_deref(), Some("api_token"));
+    }
+
+    #[test]
+    fn generic_smtp_is_outbound_only_and_requires_a_manual_host() {
+        let provider = provider_presets()
+            .into_iter()
+            .find(|provider| provider.id == "generic-smtp")
+            .expect("preset");
+        assert!(provider.incoming.is_none());
+        let outgoing = provider.outgoing.expect("outgoing preset");
+        assert_eq!(outgoing.protocol, "smtp");
+        assert!(outgoing.host.is_empty());
+        assert_eq!(outgoing.port, 465);
     }
 }

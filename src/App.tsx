@@ -13,6 +13,10 @@ import { useUiStore } from './stores/ui';
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 30_000, retry: 1 } } });
 
+const canSyncAccount = (account: Pick<Account, 'enabled' | 'incomingConfigured'>) => (
+  account.enabled && account.incomingConfigured
+);
+
 function MailApp() {
   const navigate = useNavigate();
   const [accountWizardOpen, setAccountWizardOpen] = useState(false);
@@ -55,6 +59,17 @@ function MailApp() {
   const currentMessages = useMemo(() => messages.data ?? [], [messages.data]);
   const refreshSync = () => {
     if (accountItems.length === 0) return;
+    const scopedAccount = scopedAccountId
+      ? accountItems.find((account) => account.id === scopedAccountId)
+      : undefined;
+    if (scopedAccountId && (!scopedAccount || !canSyncAccount(scopedAccount))) {
+      setSyncMessage('当前账户仅支持发件，无法同步邮件');
+      return;
+    }
+    if (!scopedAccountId && !accountItems.some(canSyncAccount)) {
+      setSyncMessage('当前没有可同步的收件账户');
+      return;
+    }
     setSyncMessage(scopedAccountId ? '正在同步…' : '正在同步所有账户…');
     const task = scopedAccountId ? startSync(scopedAccountId).then(() => undefined) : syncAll().then(() => undefined);
     void task.catch((error) => setSyncMessage(appErrorMessage(error)));
@@ -113,7 +128,8 @@ function MailApp() {
   const handleAccountSaved = (account: Account) => {
     // Adding the first account already starts its sync below. Prevent the startup
     // effect from immediately cancelling and restarting that same request.
-    if (accountItems.length === 0) initialSyncStarted.current = true;
+    const shouldStartSync = canSyncAccount(account);
+    if (accountItems.length === 0 && shouldStartSync) initialSyncStarted.current = true;
     queryClient.setQueryData<Account[]>(['accounts'], (current = []) => [
       account,
       ...current.filter((item) => item.id !== account.id),
@@ -121,10 +137,13 @@ function MailApp() {
     setSelectedAccountId(account.id);
     selectMailbox('inbox');
     setAccountWizardOpen(false);
-    navigate('/mail');
+    navigate(shouldStartSync ? '/mail' : '/outbox');
     void queryClient.invalidateQueries({ queryKey: ['accounts'] });
     void queryClient.invalidateQueries({ queryKey: ['mailboxes'] });
-    void startSync(account.id).catch((error) => setSyncMessage(appErrorMessage(error)));
+    void queryClient.invalidateQueries({ queryKey: ['outbox'] });
+    if (shouldStartSync) {
+      void startSync(account.id).catch((error) => setSyncMessage(appErrorMessage(error)));
+    }
   };
 
   const handleRemoveAccount = async (accountId: string) => {
@@ -158,10 +177,11 @@ function MailApp() {
         accounts={accountItems}
         selectedAccountId={scopedAccountId}
         onSelectAccount={(accountId) => {
+          const account = accountItems.find((item) => item.id === accountId);
           setSelectedAccountId(accountId);
           setSyncMessage(null);
           selectMailbox('inbox');
-          navigate('/mail');
+          navigate(account?.incomingConfigured ? '/mail' : '/outbox');
         }}
         mailboxes={mailboxItems}
         messageCount={mailboxItems.filter((mailbox) => mailbox.specialRole === 'inbox').reduce((total, mailbox) => total + mailbox.unreadCount, 0)}

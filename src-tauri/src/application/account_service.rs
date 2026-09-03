@@ -283,7 +283,7 @@ mod tests {
     use crate::auth::secret_store::{SecretStore, SecretStoreError};
     use crate::backends::incoming::{IncomingConfig, ServerCapabilities};
     use crate::backends::outgoing::OutgoingConfig;
-    use crate::domain::account::CreateAccountInput;
+    use crate::domain::account::{CreateAccountInput, EndpointConfig};
     use crate::domain::capabilities::ProviderCapabilities;
     use crate::errors::{AppError, AppErrorDto};
     use crate::storage::database::Database;
@@ -461,12 +461,19 @@ mod tests {
         CreateAccountInput {
             email: "sender@example.com".into(),
             display_name: "Sender".into(),
-            provider_id: "cloudflare-smtp".into(),
-            secret: "api-token".into(),
+            provider_id: "generic-smtp".into(),
+            secret: "smtp-secret".into(),
             incoming_secret: None,
             outgoing_secret: None,
             incoming: None,
-            outgoing: None,
+            outgoing: Some(EndpointConfig {
+                protocol: "smtp".into(),
+                host: "smtp.example.com".into(),
+                port: 587,
+                tls_mode: "starttls".into(),
+                auth_method: "password".into(),
+                username: "smtp-user".into(),
+            }),
         }
     }
 
@@ -599,6 +606,14 @@ mod tests {
             ["probe:outgoing", "secret:set"]
         );
         assert_eq!(store.values.lock().expect("secret lock").len(), 1);
+        let outgoing = state
+            .database
+            .lock()
+            .expect("database lock")
+            .outgoing_config(&account.id)
+            .expect("outgoing configuration");
+        assert_eq!(outgoing.host, "smtp.example.com");
+        assert_eq!(outgoing.port, 587);
     }
 
     #[tokio::test]
