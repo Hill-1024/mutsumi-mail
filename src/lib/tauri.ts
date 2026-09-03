@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   Account,
   AppErrorDto,
+  DraftAttachment,
   DraftInput,
   Mailbox,
   Message,
@@ -108,6 +109,13 @@ export async function saveDraft(input: DraftInput): Promise<{ id: string; savedA
 
 export async function sendDraft(input: DraftInput): Promise<{ outboxId: string; state: string }> {
   return call('send_draft', { input });
+}
+
+export async function sendDraftWithAttachments(
+  input: DraftInput,
+  attachments: DraftAttachment[],
+): Promise<{ outboxId: string; state: string }> {
+  return call('send_draft_with_attachments', { input, attachments });
 }
 
 export async function listOutbox(accountId?: string): Promise<OutboxItem[]> {

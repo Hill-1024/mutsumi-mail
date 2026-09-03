@@ -117,6 +117,12 @@ export interface DraftInput {
   references?: string[];
 }
 
+export interface DraftAttachment {
+  name: string;
+  contentType: string;
+  bytes: number[];
+}
+
 export interface OutboxItem {
   id: string;
   accountId: string;

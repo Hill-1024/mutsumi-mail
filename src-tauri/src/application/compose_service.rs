@@ -2,10 +2,10 @@ use crate::app_state::AppState;
 use crate::application::sync_service;
 use crate::backends::outgoing::{OutgoingError, OutgoingMailBackend, SendResult};
 use crate::backends::smtp::SmtpOutgoingBackend;
-use crate::domain::{DraftInput, OutboxItem};
+use crate::domain::{DraftAttachment, DraftInput, OutboxItem};
 use crate::errors::AppError;
 use crate::storage::database::{OutboxDraft, PreparedOutboxPayload};
-use lettre::message::header::ContentType;
+use lettre::message::{header::ContentType, Attachment, MultiPart, SinglePart};
 use lettre::Message;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
@@ -25,9 +25,17 @@ pub fn queue_draft(state: &AppState, input: DraftInput) -> Result<serde_json::Va
 }
 
 pub fn queue_draft_id(state: &AppState, input: DraftInput) -> Result<String, AppError> {
+    queue_draft_with_attachments(state, input, Vec::new())
+}
+
+pub fn queue_draft_with_attachments(
+    state: &AppState,
+    input: DraftInput,
+    attachments: Vec<DraftAttachment>,
+) -> Result<String, AppError> {
     // Fail synchronously for deterministic errors. The command must not return a queued
     // success for an invalid recipient, broken MIME, disabled account, or missing SMTP secret.
-    let prepared = prepare_delivery(state, &draft_from_input(&input))?;
+    let prepared = prepare_delivery(state, &draft_from_input(&input), &attachments)?;
     state
         .database
         .lock()
@@ -181,7 +189,11 @@ fn sent_copy_policy(config: &crate::backends::outgoing::OutgoingConfig) -> SentC
     }
 }
 
-fn prepare_delivery(state: &AppState, draft: &OutboxDraft) -> Result<PreparedDelivery, AppError> {
+fn prepare_delivery(
+    state: &AppState,
+    draft: &OutboxDraft,
+    attachments: &[DraftAttachment],
+) -> Result<PreparedDelivery, AppError> {
     let (config, secret, envelope_from) = outgoing_session(state, draft)?;
     SmtpOutgoingBackend::new(config.clone())
         .validate_configuration(&secret)
@@ -194,7 +206,13 @@ fn prepare_delivery(state: &AppState, draft: &OutboxDraft) -> Result<PreparedDel
         .cloned()
         .collect::<Vec<_>>();
     let rfc_message_id = new_message_id(&envelope_from);
-    let mime = build_plain_mime(draft, &envelope_from, &recipients, &rfc_message_id)?;
+    let mime = build_mime(
+        draft,
+        &envelope_from,
+        &recipients,
+        &rfc_message_id,
+        attachments,
+    )?;
     Ok(PreparedDelivery {
         config,
         secret,
@@ -216,7 +234,10 @@ fn prepare_claimed_delivery(
     outbox_id: &str,
     draft: &OutboxDraft,
 ) -> Result<PreparedDelivery, AppError> {
-    let mut prepared = prepare_delivery(state, draft)?;
+    // A queued item already owns an immutable MIME payload. Rebuilding the plain-text
+    // fallback here is only for rows created before payload persistence existed; the
+    // database keeps the original attachment-bearing payload when present.
+    let mut prepared = prepare_delivery(state, draft, &[])?;
     let payload = state
         .database
         .lock()
@@ -275,20 +296,24 @@ fn outgoing_session(
     Ok((config, secret, envelope_from))
 }
 
-fn build_plain_mime(
+const MAX_ATTACHMENT_COUNT: usize = 20;
+const MAX_ATTACHMENT_BYTES: usize = 18 * 1024 * 1024;
+
+fn build_mime(
     draft: &OutboxDraft,
     envelope_from: &str,
     recipients: &[String],
     rfc_message_id: &str,
+    attachments: &[DraftAttachment],
 ) -> Result<Vec<u8>, AppError> {
+    validate_attachments(attachments)?;
     let mut builder =
         Message::builder()
             .from(envelope_from.parse().map_err(|error| {
                 AppError::InvalidConfiguration(format!("发件人地址无效：{error}"))
             })?)
             .message_id(Some(rfc_message_id.to_owned()))
-            .subject(&draft.subject)
-            .header(ContentType::TEXT_PLAIN);
+            .subject(&draft.subject);
     for recipient in &draft.to {
         builder = builder.to(recipient
             .parse()
@@ -314,8 +339,27 @@ fn build_plain_mime(
     if recipients.is_empty() {
         return Err(AppError::InvalidConfiguration("至少需要一个收件人".into()));
     }
-    builder
-        .body(draft.body_text.clone())
+    let message = if attachments.is_empty() {
+        builder
+            .header(ContentType::TEXT_PLAIN)
+            .body(draft.body_text.clone())
+    } else {
+        let mut multipart =
+            MultiPart::mixed().singlepart(SinglePart::plain(draft.body_text.clone()));
+        for attachment in attachments {
+            let content_type = ContentType::parse(&attachment.content_type)
+                .or_else(|_| ContentType::parse("application/octet-stream"))
+                .map_err(|error| {
+                    AppError::InvalidConfiguration(format!("附件 MIME 类型无效：{error}"))
+                })?;
+            multipart = multipart.singlepart(
+                Attachment::new(safe_attachment_name(&attachment.name))
+                    .body(attachment.bytes.clone(), content_type),
+            );
+        }
+        builder.multipart(multipart)
+    };
+    message
         .map(|message| {
             let mut formatted = message.formatted();
             if !formatted.ends_with(b"\r\n") {
@@ -324,6 +368,39 @@ fn build_plain_mime(
             formatted
         })
         .map_err(|error| AppError::InvalidConfiguration(format!("无法生成 MIME：{error}")))
+}
+
+fn validate_attachments(attachments: &[DraftAttachment]) -> Result<(), AppError> {
+    if attachments.len() > MAX_ATTACHMENT_COUNT {
+        return Err(AppError::InvalidConfiguration(format!(
+            "一次最多添加 {MAX_ATTACHMENT_COUNT} 个附件"
+        )));
+    }
+    let total = attachments.iter().try_fold(0_usize, |total, attachment| {
+        total
+            .checked_add(attachment.bytes.len())
+            .ok_or_else(|| AppError::InvalidConfiguration("附件总大小超出限制".into()))
+    })?;
+    if total > MAX_ATTACHMENT_BYTES {
+        return Err(AppError::InvalidConfiguration(
+            "附件总大小最多 18 MiB，以避免 SMTP 编码后超出常见服务商限制".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn safe_attachment_name(name: &str) -> String {
+    let candidate = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .replace(['\r', '\n', '\0'], "");
+    if candidate.is_empty() {
+        "attachment".into()
+    } else {
+        candidate.chars().take(180).collect()
+    }
 }
 
 fn set_state(
@@ -433,11 +510,9 @@ fn map_outgoing_error(error: OutgoingError) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_plain_mime, draft_from_input, new_message_id, sent_copy_policy, SentCopyPolicy,
-    };
+    use super::{build_mime, draft_from_input, new_message_id, sent_copy_policy, SentCopyPolicy};
     use crate::backends::outgoing::OutgoingConfig;
-    use crate::domain::DraftInput;
+    use crate::domain::{DraftAttachment, DraftInput};
     use crate::errors::AppError;
     use crate::storage::database::OutboxDraft;
 
@@ -453,7 +528,7 @@ mod tests {
             in_reply_to: Some("<parent@example.com>".into()),
             references: vec!["<root@example.com>".into(), "<parent@example.com>".into()],
         };
-        let mime = build_plain_mime(
+        let mime = build_mime(
             &draft,
             "from@example.com",
             &[
@@ -462,6 +537,7 @@ mod tests {
                 "bcc@example.com".into(),
             ],
             "<stable-message@example.com>",
+            &[],
         )
         .expect("mime");
         let text = String::from_utf8_lossy(&mime);
@@ -487,11 +563,12 @@ mod tests {
             references: Vec::new(),
         };
         assert!(matches!(
-            build_plain_mime(
+            build_mime(
                 &no_recipients,
                 "from@example.com",
                 &[],
-                "<empty@example.com>"
+                "<empty@example.com>",
+                &[]
             ),
             Err(AppError::InvalidConfiguration(_))
         ));
@@ -501,14 +578,45 @@ mod tests {
             ..no_recipients
         };
         assert!(matches!(
-            build_plain_mime(
+            build_mime(
                 &invalid,
                 "from@example.com",
                 &["not-an-email".into()],
-                "<invalid@example.com>"
+                "<invalid@example.com>",
+                &[]
             ),
             Err(AppError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn builds_multipart_mime_for_user_selected_attachments() {
+        let draft = OutboxDraft {
+            account_id: "account".into(),
+            to: vec!["to@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "附件".into(),
+            body_text: "请查收".into(),
+            in_reply_to: None,
+            references: Vec::new(),
+        };
+        let mime = build_mime(
+            &draft,
+            "from@example.com",
+            &["to@example.com".into()],
+            "<attachment@example.com>",
+            &[DraftAttachment {
+                name: "report.pdf".into(),
+                content_type: "application/pdf".into(),
+                bytes: b"PDF bytes".to_vec(),
+            }],
+        )
+        .expect("multipart MIME");
+        let text = String::from_utf8_lossy(&mime);
+        assert!(text.contains("multipart/mixed"));
+        assert!(text.contains("report.pdf"));
+        assert!(text.contains("application/pdf"));
     }
 
     #[test]

@@ -4,8 +4,14 @@ import { useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Icon } from '../lib/icons';
-import { appErrorMessage, saveDraft, sendDraft } from '../lib/tauri';
-import type { Account, OutboxItem } from '../types';
+import {
+  appErrorMessage,
+  isTauriRuntime,
+  saveDraft,
+  sendDraft,
+  sendDraftWithAttachments,
+} from '../lib/tauri';
+import type { Account, DraftAttachment, OutboxItem } from '../types';
 import { useUiStore } from '../stores/ui';
 
 const composeSchema = z.object({
@@ -13,10 +19,48 @@ const composeSchema = z.object({
   cc: z.string().optional(),
   bcc: z.string().optional(),
   subject: z.string().min(1, '请输入主题'),
-  bodyText: z.string().min(1, '请输入邮件内容'),
+  bodyText: z.string(),
 });
 
 type ComposeForm = z.infer<typeof composeSchema>;
+
+const MAX_ATTACHMENT_COUNT = 20;
+const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024;
+
+function fileNameFromPath(path: string): string {
+  const withoutQuery = path.split('?')[0] ?? path;
+  const name = withoutQuery.split(/[\\/]/).filter(Boolean).at(-1) || 'attachment';
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
+function mimeTypeFor(name: string): string {
+  const extension = name.split('.').at(-1)?.toLowerCase();
+  const types: Record<string, string> = {
+    pdf: 'application/pdf',
+    txt: 'text/plain; charset=utf-8',
+    csv: 'text/csv; charset=utf-8',
+    json: 'application/json',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    heic: 'image/heic',
+    mp3: 'audio/mpeg',
+    mp4: 'video/mp4',
+    zip: 'application/zip',
+  };
+  return (extension && types[extension]) || 'application/octet-stream';
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export function ComposeDialog({
   accounts,
@@ -44,6 +88,8 @@ export function ComposeDialog({
   const [status, setStatus] = useState<'idle' | 'saving' | 'queued' | 'error'>('idle');
   const [statusMessage, setStatusMessage] = useState('');
   const [showCcBcc, setShowCcBcc] = useState(Boolean(composeDraft?.cc || composeDraft?.bcc));
+  const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
+  const [selectingAttachments, setSelectingAttachments] = useState(false);
   const selectedSenderId = sendAccounts.some((account) => account.id === accountId)
     ? accountId
     : initialAccountId;
@@ -143,7 +189,7 @@ export function ComposeDialog({
         setStatusMessage('草稿已保存在本地');
         setStatus('queued');
       } else {
-        const result = await sendDraft({
+        const input = {
           id: draftId,
           to: values.to,
           cc: values.cc,
@@ -153,7 +199,10 @@ export function ComposeDialog({
           accountId: selectedSenderId,
           inReplyTo: composeDraft?.inReplyTo,
           references: composeDraft?.references,
-        });
+        };
+        const result = attachments.length
+          ? await sendDraftWithAttachments(input, attachments)
+          : await sendDraft(input);
         const queuedItem: OutboxItem = {
           id: result.outboxId,
           accountId: selectedSenderId,
@@ -183,6 +232,60 @@ export function ComposeDialog({
     } catch (error) {
       setStatus('error');
       setStatusMessage(appErrorMessage(error));
+    }
+  };
+
+  const selectAttachments = async () => {
+    if (!isTauriRuntime) {
+      setStatus('error');
+      setStatusMessage('附件选择需要在已安装的 Mutsumi Mail 客户端中完成。');
+      return;
+    }
+    if (attachments.length >= MAX_ATTACHMENT_COUNT) {
+      setStatus('error');
+      setStatusMessage(`一次最多添加 ${MAX_ATTACHMENT_COUNT} 个附件。`);
+      return;
+    }
+
+    setSelectingAttachments(true);
+    setStatus('idle');
+    setStatusMessage('');
+    try {
+      const [{ open }, { readFile }] = await Promise.all([
+        import('@tauri-apps/plugin-dialog'),
+        import('@tauri-apps/plugin-fs'),
+      ]);
+      const selection = await open({
+        multiple: true,
+        directory: false,
+        title: '选择要发送的附件',
+      });
+      const paths = Array.isArray(selection) ? selection : selection ? [selection] : [];
+      if (!paths.length) return;
+      if (attachments.length + paths.length > MAX_ATTACHMENT_COUNT) {
+        throw new Error(`一次最多添加 ${MAX_ATTACHMENT_COUNT} 个附件。`);
+      }
+
+      const selected = await Promise.all(
+        paths.map(async (path) => {
+          const bytes = await readFile(path);
+          return {
+            name: fileNameFromPath(path),
+            contentType: mimeTypeFor(fileNameFromPath(path)),
+            bytes: Array.from(bytes),
+          } satisfies DraftAttachment;
+        }),
+      );
+      const total = [...attachments, ...selected].reduce((sum, attachment) => sum + attachment.bytes.length, 0);
+      if (total > MAX_ATTACHMENT_BYTES) {
+        throw new Error('附件总大小最多 18 MB；请移除部分文件后重试。');
+      }
+      setAttachments((current) => [...current, ...selected]);
+    } catch (error) {
+      setStatus('error');
+      setStatusMessage(appErrorMessage(error));
+    } finally {
+      setSelectingAttachments(false);
     }
   };
 
@@ -292,6 +395,27 @@ export function ComposeDialog({
           />
           {errors.bodyText && <div className="field-error">{errors.bodyText.message}</div>}
 
+          {attachments.length ? (
+            <ul className="compose-attachments" aria-label="待发送附件">
+              {attachments.map((attachment, index) => (
+                <li key={`${attachment.name}-${index}`}>
+                  <Icon name="paperclip" size={17} />
+                  <span title={attachment.name}>{attachment.name}</span>
+                  <small>{formatBytes(attachment.bytes.length)}</small>
+                  <button
+                    type="button"
+                    className="icon-button subtle"
+                    aria-label={`移除附件 ${attachment.name}`}
+                    title="移除附件"
+                    onClick={() => setAttachments((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+                  >
+                    <Icon name="close" size={17} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
           {status !== 'idle' && (
             <div
               className={`compose-status ${status === 'error' ? 'is-error' : ''}`}
@@ -304,6 +428,16 @@ export function ComposeDialog({
           )}
 
           <div className="compose-toolbar">
+            <button
+              type="button"
+              className="text-action compose-attachment-action"
+              onClick={() => void selectAttachments()}
+              disabled={selectingAttachments || status === 'saving'}
+              title="添加附件"
+            >
+              <Icon name="paperclip" size={18} />
+              <span>{selectingAttachments ? '正在读取…' : '添加附件'}</span>
+            </button>
             <span className="compose-spacer" />
             <button
               type="button"

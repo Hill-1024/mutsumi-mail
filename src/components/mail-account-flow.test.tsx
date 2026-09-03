@@ -28,6 +28,7 @@ const apiMocks = vi.hoisted(() => ({
   saveDraft: vi.fn(),
   searchMessages: vi.fn(),
   sendDraft: vi.fn(),
+  sendDraftWithAttachments: vi.fn(),
   startSync: vi.fn(),
   syncAll: vi.fn(),
   updateSettings: vi.fn(),
@@ -377,6 +378,11 @@ describe('邮箱账户关键流程', () => {
       withQueryClient(
         <ComposeDialog accounts={accounts} defaultAccountId="account-a" onClose={vi.fn()} />,
       ),
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '添加附件' }));
+    expect((await screen.findByRole('alert')).textContent).toContain(
+      '附件选择需要在已安装的 Mutsumi Mail 客户端中完成。',
     );
 
     fireEvent.change(screen.getByLabelText('选择发件账户'), { target: { value: 'account-b' } });

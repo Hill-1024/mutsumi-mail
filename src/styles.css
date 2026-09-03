@@ -2183,6 +2183,44 @@ textarea:focus-visible {
   flex: 1;
 }
 
+.compose-attachment-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.compose-attachments {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.compose-attachments li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 8px 4px 12px;
+  border-radius: var(--md-sys-shape-corner-small);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.compose-attachments span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.compose-attachments small {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 /* MD3 Filled & Tonal Action Buttons */
 .send-action,
 .primary-action {

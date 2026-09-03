@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required for Android 13+ system notifications. The app requests it only
+         after the person turns on notification permission in Settings. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- User-approved all-files access for selecting and attaching any local file.
+         Android presents this as a special-access Settings page, not a runtime dialog. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />

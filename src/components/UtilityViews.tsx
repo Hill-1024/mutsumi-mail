@@ -5,6 +5,12 @@ import type { Account, Message, OutboxItem } from '../types';
 import { Icon } from '../lib/icons';
 import { appErrorMessage, cancelOutboxItem, clearCache, getSettings, retryOutboxItem, searchMessages, updateSettings } from '../lib/tauri';
 import { filterMessages } from '../lib/mail-utils';
+import {
+  getAllFilesAccess,
+  requestAllFilesAccess,
+  requestNotificationAccess,
+  type AllFilesAccess,
+} from '../lib/platform-permissions';
 import { useUiStore } from '../stores/ui';
 
 export function SearchView({ messages, accountId }: { messages: Message[]; accountId?: string }) {
@@ -254,6 +260,8 @@ export function SettingsView({
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [accountError, setAccountError] = useState('');
+  const [permissionFeedback, setPermissionFeedback] = useState('');
+  const [allFilesAccess, setAllFilesAccess] = useState<AllFilesAccess | 'checking'>('checking');
 
   useEffect(() => {
     setNavPage('settings');
@@ -265,6 +273,17 @@ export function SettingsView({
       })
       .catch(() => undefined);
   }, [setNavPage, setSafeReading, setThemeMode]);
+
+  useEffect(() => {
+    const refreshAllFilesAccess = () => {
+      void getAllFilesAccess()
+        .then(setAllFilesAccess)
+        .catch(() => setAllFilesAccess('not-granted'));
+    };
+    refreshAllFilesAccess();
+    window.addEventListener('focus', refreshAllFilesAccess);
+    return () => window.removeEventListener('focus', refreshAllFilesAccess);
+  }, []);
 
   const changeTheme = (mode: 'system' | 'light' | 'dark') => {
     setThemeMode(mode);
@@ -294,6 +313,33 @@ export function SettingsView({
       setAccountError(appErrorMessage(error));
     } finally {
       setRemovingId(null);
+    }
+  };
+
+  const enableNotifications = async () => {
+    setPermissionFeedback('正在请求系统通知权限…');
+    try {
+      const result = await requestNotificationAccess();
+      setPermissionFeedback(
+        result === 'granted'
+          ? '系统通知权限已开启。'
+          : result === 'denied'
+            ? '系统通知未获授权；可在系统设置中随时修改。'
+            : '请在已安装的 Mutsumi Mail 客户端中申请系统通知权限。',
+      );
+    } catch (error) {
+      setPermissionFeedback(appErrorMessage(error));
+    }
+  };
+
+  const enableAllFilesAccess = async () => {
+    setPermissionFeedback('已打开 Android 的“所有文件访问权限”系统设置。完成后返回本应用。');
+    try {
+      const result = await requestAllFilesAccess();
+      setAllFilesAccess(result);
+      if (result === 'granted') setPermissionFeedback('已获得 Android 所有文件访问权限。');
+    } catch (error) {
+      setPermissionFeedback(appErrorMessage(error));
     }
   };
 
@@ -339,6 +385,48 @@ export function SettingsView({
             </div>
           )}
           {accountError && <div className="setting-feedback is-error" role="alert"><Icon name="close" size={16} /><span>{accountError}</span></div>}
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">
+            <Icon name="shield" size={20} />
+            <h2>系统权限</h2>
+          </div>
+          <div className="setting-row">
+            <div>
+              <strong>新邮件通知</strong>
+              <span>仅在你点击开启后请求系统通知权限。</span>
+            </div>
+            <button className="outlined-action" type="button" onClick={() => void enableNotifications()}>
+              开启通知
+            </button>
+          </div>
+          {allFilesAccess !== 'not-applicable' && (
+            <div className="setting-row">
+              <div>
+                <strong>所有文件访问权限</strong>
+                <span>
+                  {allFilesAccess === 'granted'
+                    ? '已允许访问设备上的文件，可作为邮件附件发送。'
+                    : 'Android 会在系统设置页授权，用于选择并发送设备文件。'}
+                </span>
+              </div>
+              <button
+                className="outlined-action"
+                type="button"
+                disabled={allFilesAccess === 'checking' || allFilesAccess === 'granted'}
+                onClick={() => void enableAllFilesAccess()}
+              >
+                {allFilesAccess === 'granted' ? '已允许' : '管理权限'}
+              </button>
+            </div>
+          )}
+          {permissionFeedback && (
+            <div className="setting-feedback" role="status" aria-live="polite">
+              <Icon name="checkCircle" size={16} />
+              <span>{permissionFeedback}</span>
+            </div>
+          )}
         </div>
 
         <div className="settings-section">

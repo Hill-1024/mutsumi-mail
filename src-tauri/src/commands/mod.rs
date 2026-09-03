@@ -8,7 +8,9 @@ use crate::backends::{
     imap::ImapIncomingBackend, incoming::IncomingMailBackend, outgoing::OutgoingMailBackend,
     smtp::SmtpOutgoingBackend,
 };
-use crate::domain::{account::CreateAccountInput, Account, DraftInput, Message, SyncStatus};
+use crate::domain::{
+    account::CreateAccountInput, Account, DraftAttachment, DraftInput, Message, SyncStatus,
+};
 use crate::errors::AppErrorDto;
 use crate::providers::registry::{
     detect_provider as find_provider, provider_presets, ProviderPreset,
@@ -366,6 +368,19 @@ pub fn send_draft(
     input: DraftInput,
 ) -> Result<serde_json::Value, AppErrorDto> {
     let outbox_id = compose_service::queue_draft_id(&state, input).map_err(AppErrorDto::from)?;
+    compose_service::spawn_delivery(app, outbox_id.clone());
+    Ok(serde_json::json!({ "outboxId": outbox_id, "state": "queued" }))
+}
+
+#[tauri::command]
+pub fn send_draft_with_attachments(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    input: DraftInput,
+    attachments: Vec<DraftAttachment>,
+) -> Result<serde_json::Value, AppErrorDto> {
+    let outbox_id = compose_service::queue_draft_with_attachments(&state, input, attachments)
+        .map_err(AppErrorDto::from)?;
     compose_service::spawn_delivery(app, outbox_id.clone());
     Ok(serde_json::json!({ "outboxId": outbox_id, "state": "queued" }))
 }

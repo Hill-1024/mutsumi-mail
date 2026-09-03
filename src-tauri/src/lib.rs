@@ -1,3 +1,4 @@
+mod all_files_access;
 mod app_state;
 mod application;
 mod auth;
@@ -15,8 +16,14 @@ use std::fs;
 
 use tauri::Manager;
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(all_files_access::init());
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(
         |app, _arguments, _working_directory| {
@@ -73,6 +80,7 @@ pub fn run() {
             commands::set_starred,
             commands::save_draft,
             commands::send_draft,
+            commands::send_draft_with_attachments,
             commands::list_outbox,
             commands::start_sync,
             commands::cancel_sync,
@@ -112,10 +120,15 @@ pub fn run() {
     app.run(|app, event| {
         #[cfg(any(target_os = "android", target_os = "ios"))]
         match event {
-            // Mobile operating systems suspend ordinary processes in the background. Closing
-            // the socket here avoids a fake "always on" loop that wastes battery and is
-            // terminated by the OS; resume starts a fresh incremental sync and IDLE listener.
-            tauri::RunEvent::Suspended => {
+            // `RunEvent::Suspended` is gated behind Tauri's internal `mobile`
+            // cfg and is not exported to application crates on all Android
+            // builds. Losing focus is the portable lifecycle signal available
+            // here; stop IDLE rather than pretending a background socket is
+            // durable. A later resume restarts incremental sync and IDLE.
+            tauri::RunEvent::WindowEvent {
+                event: tauri::WindowEvent::Focused(false),
+                ..
+            } => {
                 if let Some(state) = app.try_state::<app_state::AppState>() {
                     state.realtime.suspend();
                 }

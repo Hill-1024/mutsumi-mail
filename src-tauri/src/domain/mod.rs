@@ -80,6 +80,18 @@ pub struct DraftInput {
     pub references: Option<Vec<String>>,
 }
 
+/// Binary data selected by the user for one outgoing MIME attachment. The
+/// frontend can only obtain these bytes through the native file picker scope;
+/// the SMTP worker persists the resulting immutable MIME payload before it
+/// starts delivery, so a retry never needs to reopen the user file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DraftAttachment {
+    pub name: String,
+    pub content_type: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboxItem {
