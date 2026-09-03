@@ -118,13 +118,16 @@ pub fn run() {
         }
     };
     app.run(|app, event| {
-        #[cfg(any(target_os = "android", target_os = "ios"))]
+        // Android keeps the process hosting this runtime alive with MailSyncService. Do not
+        // suspend IMAP IDLE when the Activity loses focus: that includes removing the UI task.
+        #[cfg(target_os = "android")]
+        if let tauri::RunEvent::Resumed = event {
+            if let Some(state) = app.try_state::<app_state::AppState>() {
+                state.realtime.resume();
+            }
+        }
+        #[cfg(target_os = "ios")]
         match event {
-            // `RunEvent::Suspended` is gated behind Tauri's internal `mobile`
-            // cfg and is not exported to application crates on all Android
-            // builds. Losing focus is the portable lifecycle signal available
-            // here; stop IDLE rather than pretending a background socket is
-            // durable. A later resume restarts incremental sync and IDLE.
             tauri::RunEvent::WindowEvent {
                 event: tauri::WindowEvent::Focused(false),
                 ..

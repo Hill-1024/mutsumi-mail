@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use mail_parser::MessageParser;
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::app_state::AppState;
@@ -107,7 +108,7 @@ pub(crate) fn start_sync_if_idle_with_session(
     let Some(token) = state.sync.try_start(&account_id) else {
         return Ok(None);
     };
-    start_sync_with_loaded_session(state, app, account_id, config, secret, token).map(Some)
+    start_sync_with_loaded_session(state, app, account_id, config, secret, token, true).map(Some)
 }
 
 fn start_sync_with_token(
@@ -130,7 +131,7 @@ fn start_sync_with_token(
             return Err(error);
         }
     };
-    start_sync_with_loaded_session(state, app, account_id, config, secret, token)
+    start_sync_with_loaded_session(state, app, account_id, config, secret, token, false)
 }
 
 fn start_sync_with_loaded_session(
@@ -140,7 +141,30 @@ fn start_sync_with_loaded_session(
     config: IncomingConfig,
     secret: String,
     token: CancellationToken,
+    should_notify_new_mail: bool,
 ) -> Result<SyncStatus, AppError> {
+    // A first sync can insert an entire mailbox history. Remember whether this account has
+    // already completed a sync before this pass, so only subsequent realtime deltas notify.
+    let had_completed_sync = if should_notify_new_mail {
+        state
+            .database
+            .lock()
+            .ok()
+            .and_then(|database| {
+                database
+                    .list_accounts()
+                    .ok()
+                    .and_then(|accounts| {
+                        accounts
+                            .into_iter()
+                            .find(|account| account.id == account_id)
+                            .and_then(|account| account.last_synced_at)
+                    })
+            })
+            .is_some()
+    } else {
+        false
+    };
     let initial_status = SyncStatus {
         account_id: account_id.clone(),
         state: "syncing".into(),
@@ -183,11 +207,17 @@ fn start_sync_with_loaded_session(
         match synchronize_account(&app, &account_for_task, &backend, &secret, &token).await {
             Ok(report) => {
                 let completed_account = account_for_task.clone();
+                let notification_app = app.clone();
                 finish_current_sync(&app, &account_for_task, &token, move |state| {
                     match state.database.lock() {
                         Ok(mut database) => {
                             match database.mark_account_sync_completed(&completed_account) {
-                                Ok(()) => successful_sync_status(completed_account, report),
+                                Ok(()) => {
+                                    if should_notify_new_mail && had_completed_sync && report.inserted > 0 {
+                                        notify_new_mail(&notification_app, report.inserted);
+                                    }
+                                    successful_sync_status(completed_account, report)
+                                }
                                 Err(error) => sync_error_status(completed_account, error),
                             }
                         }
@@ -212,6 +242,26 @@ fn start_sync_with_loaded_session(
         }
     });
     Ok(initial_status)
+}
+
+fn notify_new_mail(app: &AppHandle, inserted: usize) {
+    let body = if inserted == 1 {
+        "你有 1 封新邮件".to_string()
+    } else {
+        format!("你有 {inserted} 封新邮件")
+    };
+    if let Err(error) = app
+        .notification()
+        .builder()
+        .id(4_201)
+        .title("Mutsumi Mail")
+        .body(body)
+        .show()
+    {
+        // Notification access is optional. A denied or unavailable permission must never make
+        // a successfully synchronized mailbox look failed.
+        tracing::debug!(%error, "new-mail notification was not delivered");
+    }
 }
 
 async fn synchronize_account<B: IncomingMailBackend + ?Sized>(

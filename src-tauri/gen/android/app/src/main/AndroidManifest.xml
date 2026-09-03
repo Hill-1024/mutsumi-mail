@@ -4,6 +4,10 @@
     <!-- Required for Android 13+ system notifications. The app requests it only
          after the person turns on notification permission in Settings. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- The foreground data-sync service is what keeps IMAP IDLE alive when the
+         visible Activity task is removed. Android 14+ requires both declarations. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <!-- User-approved all-files access for selecting and attaching any local file.
          Android presents this as a special-access Settings page, not a runtime dialog. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -31,6 +35,12 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".MailSyncService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
 
         <provider
           android:name="androidx.core.content.FileProvider"
