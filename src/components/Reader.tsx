@@ -2,20 +2,172 @@ import type { Message } from '../types';
 import { Icon } from '../lib/icons';
 import { useUiStore } from '../stores/ui';
 
-export function Reader({ message, onBack, onMutate, onArchive, onDelete }: { message: Message; onBack?: () => void; onMutate?: (messageId: string, mutation: { isRead?: boolean; isStarred?: boolean }) => void; onArchive?: (messageId: string) => void; onDelete?: (messageId: string) => void }) {
-  const { setComposeOpen } = useUiStore();
-  const initials = message.from.name?.split(' ').map((part) => part[0]).join('').slice(0, 2) ?? message.from.email.slice(0, 2).toUpperCase();
+interface ReaderProps {
+  message: Message;
+  accountEmail?: string;
+  bodyLoading?: boolean;
+  bodyError?: string;
+  onRetryBody?: () => void;
+  onBack?: () => void;
+  onMutate?: (messageId: string, mutation: { isRead?: boolean; isStarred?: boolean }) => void;
+  onArchive?: (messageId: string) => void;
+  onDelete?: (messageId: string) => void;
+}
+
+const formatFullDate = (value: string) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString('zh-CN', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
+
+export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryBody, onBack, onMutate, onArchive, onDelete }: ReaderProps) {
+  const { openComposeWithDraft, safeReading } = useUiStore();
+  const initials = message.from.name
+    ? message.from.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()
+    : message.from.email.slice(0, 2).toUpperCase();
+  const readableBody = message.bodyText ?? message.bodyHtmlText ?? message.preview;
+
+  const handleReply = () => {
+    openComposeWithDraft({
+      accountId: message.accountId,
+      to: message.from.email,
+      subject: message.subject.toLowerCase().startsWith('re:') ? message.subject : `Re: ${message.subject}`,
+      bodyText: `\n\n\n--- 原始邮件 ---\n发件人: ${message.from.name ?? ''} <${message.from.email}>\n日期: ${formatFullDate(message.date)}\n主题: ${message.subject}\n\n${readableBody}`,
+      inReplyTo: message.messageId,
+      references: message.messageId ? [message.messageId] : undefined,
+    });
+  };
+
+  const handleReplyAll = () => {
+    const ccList = (message.to ?? [])
+      .map((t) => t.email)
+      .filter((email) =>
+        email &&
+        email.toLowerCase() !== message.from.email.toLowerCase() &&
+        (!accountEmail || email.toLowerCase() !== accountEmail.toLowerCase()),
+      )
+      .join(', ');
+
+    openComposeWithDraft({
+      accountId: message.accountId,
+      to: message.from.email,
+      cc: ccList || undefined,
+      subject: message.subject.toLowerCase().startsWith('re:') ? message.subject : `Re: ${message.subject}`,
+      bodyText: `\n\n\n--- 原始邮件 ---\n发件人: ${message.from.name ?? ''} <${message.from.email}>\n日期: ${formatFullDate(message.date)}\n主题: ${message.subject}\n\n${readableBody}`,
+      inReplyTo: message.messageId,
+      references: message.messageId ? [message.messageId] : undefined,
+    });
+  };
+
+  const handleForward = () => {
+    openComposeWithDraft({
+      accountId: message.accountId,
+      to: '',
+      subject: message.subject.toLowerCase().startsWith('fwd:') ? message.subject : `Fwd: ${message.subject}`,
+      bodyText: `\n\n\n--- 转发邮件 ---\n发件人: ${message.from.name ?? ''} <${message.from.email}>\n日期: ${formatFullDate(message.date)}\n主题: ${message.subject}\n\n${readableBody}`,
+    });
+  };
+
   return (
     <article className="reader">
-      <div className="reader-toolbar"><button className="reader-tool" onClick={onBack} aria-label="返回列表"><Icon name="back" size={19} /></button><span className="reader-toolbar-label">邮件详情</span><span className="reader-toolbar-spacer" /><button className="reader-tool" onClick={() => onArchive?.(message.id)} aria-label="归档"><Icon name="archive" size={19} /></button><button className="reader-tool" onClick={() => onDelete?.(message.id)} aria-label="删除"><Icon name="trash" size={18} /></button><button className="reader-tool" aria-label="更多"><Icon name="more" size={19} /></button></div>
+      <div className="reader-toolbar">
+        <button className="reader-tool reader-back" onClick={onBack} aria-label="返回列表" title="返回列表 (Esc)">
+          <Icon name="back" size={20} />
+        </button>
+        <span className="reader-toolbar-spacer" />
+        <button
+          className={`reader-tool ${message.isStarred ? 'is-starred' : ''}`}
+          onClick={() => onMutate?.(message.id, { isStarred: !message.isStarred })}
+          aria-label={message.isStarred ? '取消星标' : '添加星标'}
+          title={message.isStarred ? '取消星标' : '标记为星标'}
+        >
+          <Icon name={message.isStarred ? 'starFilled' : 'star'} size={20} />
+        </button>
+        <button className="reader-tool" onClick={() => onArchive?.(message.id)} aria-label="归档" title="归档邮件">
+          <Icon name="archive" size={20} />
+        </button>
+        <button className="reader-tool" onClick={() => onDelete?.(message.id)} aria-label="删除" title="移至回收站">
+          <Icon name="trash" size={20} />
+        </button>
+      </div>
+
       <div className="reader-content">
-        <div className="reader-label-row"><span className="label-chip">设计</span><span className="label-chip">收件箱</span><span className="reader-date">2026 年 9 月 2 日 08:31</span></div>
-        <h2 className="reader-subject">{message.subject}</h2>
-        <div className="sender-block"><div className="sender-avatar">{initials}</div><div className="sender-details"><strong>{message.from.name ?? message.from.email}</strong><span>{message.from.email}</span></div><button className={`row-icon reader-star ${message.isStarred ? 'is-starred' : ''}`} onClick={() => onMutate?.(message.id, { isStarred: !message.isStarred })} aria-label="切换星标"><Icon name="star" size={19} /></button><button className="icon-button tiny" aria-label="更多发件人操作"><Icon name="more" size={18} /></button></div>
-        <div className="safe-html-notice"><Icon name="shield" size={17} /><span>已启用安全阅读模式。远程图片和脚本已阻止。</span><button>查看原始邮件</button></div>
-        <div className="reader-body">{(message.bodyText ?? message.preview).split('\n').map((paragraph, index) => paragraph ? <p key={`${message.id}-${index}`}>{paragraph}</p> : <div className="body-break" key={`${message.id}-${index}`} />)}</div>
-        {message.hasAttachment && <div className="attachment-card"><div className="attachment-leading"><Icon name="paperclip" size={19} /></div><div className="attachment-copy"><strong>design-review-notes.pdf</strong><span>PDF · 2.4 MB · 已缓存</span></div><button className="icon-button" aria-label="下载附件"><Icon name="download" size={18} /></button></div>}
-        <div className="reader-actions"><button className="outlined-action" onClick={() => setComposeOpen(true)}><Icon name="reply" size={18} />回复</button><button className="outlined-action" onClick={() => setComposeOpen(true)}><Icon name="replyAll" size={18} />回复全部</button><button className="outlined-action" onClick={() => setComposeOpen(true)}><Icon name="forward" size={18} />转发</button></div>
+        <h2 className="reader-subject">{message.subject || '(无主题)'}</h2>
+
+        <div className="sender-block">
+          <div className="sender-avatar">{initials}</div>
+          <div className="sender-details">
+            <div className="sender-name-row">
+              <strong className="sender-title">{message.from.name ?? message.from.email}</strong>
+              <span className="sender-email">&lt;{message.from.email}&gt;</span>
+            </div>
+            <span className="sender-date">{formatFullDate(message.date)}</span>
+          </div>
+          {message.labels && message.labels.length > 0 && (
+            <div className="reader-labels">
+              {message.labels.map((label) => (
+                <span key={label} className="reader-label-chip">#{label}</span>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {safeReading && (
+          <div className="reader-safety" title="远程图片与外部脚本已拦截">
+            <Icon name="shield" size={16} />
+            <span>已阻止远程内容</span>
+          </div>
+        )}
+
+        {bodyLoading && <div className="reader-body-status" role="status"><span className="spinner" />正在下载正文…</div>}
+        {!bodyLoading && bodyError && (
+          <div className="reader-body-status is-error" role="alert">
+            <span>{bodyError}</span>
+            <button className="text-action" type="button" onClick={onRetryBody}>重试</button>
+          </div>
+        )}
+
+        <div className="reader-body">
+          {readableBody.split('\n').map((paragraph, index) =>
+            paragraph.trim() ? (
+              <p key={`${message.id}-${index}`}>{paragraph}</p>
+            ) : (
+              <div className="body-break" key={`${message.id}-${index}`} />
+            )
+          )}
+        </div>
+
+        {message.hasAttachment && (
+          <div className="attachment-card" role="status" aria-label="邮件包含附件">
+            <div className="attachment-icon-wrapper">
+              <Icon name="paperclip" size={20} />
+            </div>
+            <div className="attachment-copy">
+              <strong>{message.attachmentCount ? `包含 ${message.attachmentCount} 个附件` : '包含附件'}</strong>
+            </div>
+          </div>
+        )}
+
+        <div className="reader-actions" aria-label="快捷操作">
+          <button className="outlined-action" onClick={handleReply} title="回复此邮件">
+            <Icon name="reply" size={18} />
+            <span>回复</span>
+          </button>
+          <button className="outlined-action" onClick={handleReplyAll} title="回复所有收件人">
+            <Icon name="replyAll" size={18} />
+            <span>回复全部</span>
+          </button>
+          <button className="outlined-action" onClick={handleForward} title="转发此邮件">
+            <Icon name="forward" size={18} />
+            <span>转发</span>
+          </button>
+        </div>
       </div>
     </article>
   );

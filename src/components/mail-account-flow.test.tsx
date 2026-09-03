@@ -1,0 +1,321 @@
+// @vitest-environment jsdom
+
+import { act } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
+import type { Account, Message, ProviderPreset } from '../types';
+import { useUiStore } from '../stores/ui';
+
+const apiMocks = vi.hoisted(() => ({
+  cancelOutboxItem: vi.fn(),
+  clearCache: vi.fn(),
+  createAccount: vi.fn(),
+  deleteMessages: vi.fn(),
+  fetchMessageBody: vi.fn(),
+  getSettings: vi.fn(),
+  listAccounts: vi.fn(),
+  listMailboxes: vi.fn(),
+  listMessages: vi.fn(),
+  listOutbox: vi.fn(),
+  moveMessages: vi.fn(),
+  mutateMessage: vi.fn(),
+  removeAccount: vi.fn(),
+  retryOutboxItem: vi.fn(),
+  saveDraft: vi.fn(),
+  searchMessages: vi.fn(),
+  sendDraft: vi.fn(),
+  startSync: vi.fn(),
+  syncAll: vi.fn(),
+  updateSettings: vi.fn(),
+}));
+
+const providerPresets = vi.hoisted(() => ([
+  {
+    id: 'qq',
+    displayName: 'QQ 邮箱',
+    emailDomainPatterns: ['qq.com'],
+    incoming: {
+      protocol: 'imap',
+      host: 'imap.qq.com',
+      port: 993,
+      tlsMode: 'implicit',
+      authMethods: ['password'],
+    },
+    outgoing: {
+      protocol: 'smtp',
+      host: 'smtp.qq.com',
+      port: 465,
+      tlsMode: 'implicit',
+      authMethods: ['password'],
+    },
+    helpText: '使用客户端授权码，不是 QQ 登录密码。',
+    capabilities: {},
+    quirks: [],
+  },
+  {
+    id: 'netease-163',
+    displayName: '网易 163 邮箱',
+    emailDomainPatterns: ['163.com'],
+    incoming: {
+      protocol: 'imap',
+      host: 'imap.163.com',
+      port: 993,
+      tlsMode: 'implicit',
+      authMethods: ['password'],
+    },
+    outgoing: {
+      protocol: 'smtp',
+      host: 'smtp.163.com',
+      port: 465,
+      tlsMode: 'implicit',
+      authMethods: ['password'],
+    },
+    helpText: '使用客户端授权码，不是网页登录密码。',
+    capabilities: {},
+    quirks: [],
+  },
+  {
+    id: 'generic',
+    displayName: '通用 IMAP + SMTP',
+    emailDomainPatterns: [],
+    incoming: {
+      protocol: 'imap',
+      host: '',
+      port: 993,
+      tlsMode: 'implicit',
+      authMethods: ['password'],
+    },
+    outgoing: {
+      protocol: 'smtp',
+      host: '',
+      port: 465,
+      tlsMode: 'implicit',
+      authMethods: ['password'],
+    },
+    helpText: '手动填写 IMAP 与 SMTP 端点。',
+    capabilities: {},
+    quirks: [],
+  },
+] satisfies ProviderPreset[]));
+
+vi.mock('../lib/tauri', () => ({
+  ...apiMocks,
+  isTauriRuntime: false,
+  providerPresets,
+  appErrorMessage: (error: unknown) => {
+    if (typeof error === 'object' && error && 'message' in error) {
+      return String(error.message);
+    }
+    return error instanceof Error ? error.message : '发生未知错误，请稍后重试';
+  },
+}));
+
+vi.mock('../lib/icons', () => ({
+  Icon: ({ name }: { name: string }) => <span data-testid={`icon-${name}`} aria-hidden="true" />,
+}));
+
+import App from '../App';
+import { AccountWizard } from './AccountWizard';
+import { ComposeDialog } from './ComposeDialog';
+import { Reader } from './Reader';
+
+const account = (overrides: Partial<Account> = {}): Account => ({
+  id: 'account-a',
+  providerId: 'qq',
+  email: 'first@qq.com',
+  displayName: '第一个账户',
+  enabled: true,
+  syncPolicy: 'automatic',
+  incomingConfigured: true,
+  outgoingConfigured: true,
+  syncStatus: 'idle',
+  ...overrides,
+});
+
+function withQueryClient(children: ReactNode) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  window.history.replaceState({}, '', '/mail');
+  Object.defineProperty(window, 'matchMedia', {
+    configurable: true,
+    value: vi.fn().mockImplementation((query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+  Object.defineProperty(window, 'requestAnimationFrame', {
+    configurable: true,
+    value: (callback: FrameRequestCallback) => window.setTimeout(() => callback(0), 0),
+  });
+
+  useUiStore.setState({
+    selectedMailboxId: 'inbox',
+    selectedMessageId: null,
+    searchOpen: false,
+    composeOpen: false,
+    composeDraft: null,
+    navPage: 'mail',
+    syncMessage: null,
+  });
+
+  apiMocks.listAccounts.mockResolvedValue([]);
+  apiMocks.listMailboxes.mockResolvedValue([]);
+  apiMocks.listMessages.mockResolvedValue([]);
+  apiMocks.listOutbox.mockResolvedValue([]);
+  apiMocks.getSettings.mockResolvedValue({
+    theme: 'system',
+    safeReading: true,
+    syncPolicy: 'automatic',
+  });
+  apiMocks.searchMessages.mockResolvedValue([]);
+  apiMocks.startSync.mockResolvedValue({ accountId: 'account-a', state: 'idle' });
+  apiMocks.syncAll.mockResolvedValue([]);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+describe('邮箱账户关键流程', () => {
+  it('QQ 授权失败时保留在凭据页、显示错误且绝不调用 onSaved', async () => {
+    const onSaved = vi.fn();
+    apiMocks.createAccount.mockRejectedValue({
+      code: 'authentication',
+      message: '客户端授权码错误，请重新输入',
+      retryable: false,
+    });
+
+    render(<AccountWizard onClose={vi.fn()} onSaved={onSaved} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /QQ 邮箱/ }));
+    fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'broken@qq.com' } });
+    fireEvent.change(screen.getByLabelText('客户端授权码'), { target: { value: 'wrong-code' } });
+    fireEvent.click(screen.getByRole('button', { name: '验证并添加' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('客户端授权码错误，请重新输入');
+    expect(screen.getByLabelText('添加邮箱，第 2 步，共 2 步')).toBeTruthy();
+    expect(screen.getByLabelText('邮箱地址')).toBeTruthy();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(apiMocks.createAccount).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it('验证成功时即使验证期间重复点击也只调用一次 onSaved', async () => {
+    const onSaved = vi.fn();
+    const savedAccount = account({ id: 'verified-account', email: 'valid@qq.com' });
+    let resolveCreate: ((value: Account) => void) | undefined;
+    apiMocks.createAccount.mockImplementation(
+      () => new Promise<Account>((resolve) => { resolveCreate = resolve; }),
+    );
+
+    render(<AccountWizard onClose={vi.fn()} onSaved={onSaved} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /QQ 邮箱/ }));
+    fireEvent.change(screen.getByLabelText('邮箱地址'), { target: { value: 'valid@qq.com' } });
+    fireEvent.change(screen.getByLabelText('客户端授权码'), { target: { value: 'valid-code' } });
+    const submit = screen.getByRole('button', { name: '验证并添加' });
+    fireEvent.click(submit);
+
+    await waitFor(() => expect(apiMocks.createAccount).toHaveBeenCalledTimes(1));
+    expect(submit).toHaveProperty('disabled', true);
+    fireEvent.click(submit);
+    expect(apiMocks.createAccount).toHaveBeenCalledTimes(1);
+
+    await act(async () => { resolveCreate?.(savedAccount); });
+    await waitFor(() => expect(onSaved).toHaveBeenCalledTimes(1));
+    expect(onSaved).toHaveBeenCalledWith(savedAccount);
+  }, 15_000);
+
+  it('零账户启动时显示主界面空状态与设置入口，不强制弹出添加邮箱', async () => {
+    window.history.replaceState({}, '', '/settings');
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: '尚未添加邮箱' })).toBeTruthy();
+    expect(window.location.pathname).toBe('/mail');
+    expect(screen.queryByRole('dialog', { name: '添加邮箱' })).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: '打开设置' }));
+    expect(await screen.findByRole('heading', { name: '邮箱账户' })).toBeTruthy();
+    expect(window.location.pathname).toBe('/settings');
+  }, 15_000);
+
+  it('多账户撰写会把用户选择的发件账户传给 sendDraft', async () => {
+    const accounts = [
+      account(),
+      account({
+        id: 'account-b',
+        providerId: 'netease-163',
+        email: 'second@163.com',
+        displayName: '第二个账户',
+      }),
+    ];
+    apiMocks.sendDraft.mockResolvedValue({ outboxId: 'outbox-1', state: 'queued' });
+
+    render(withQueryClient(
+      <ComposeDialog accounts={accounts} defaultAccountId="account-a" onClose={vi.fn()} />,
+    ));
+
+    fireEvent.change(screen.getByLabelText('选择发件账户'), { target: { value: 'account-b' } });
+    fireEvent.change(screen.getByPlaceholderText('输入一个或多个邮箱地址'), { target: { value: 'receiver@example.com' } });
+    fireEvent.change(screen.getByPlaceholderText('邮件主题'), { target: { value: '多账户发件测试' } });
+    fireEvent.change(screen.getByPlaceholderText('写下你的邮件内容…'), { target: { value: '正文' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送' }));
+
+    await waitFor(() => expect(apiMocks.sendDraft).toHaveBeenCalledTimes(1));
+    expect(apiMocks.sendDraft).toHaveBeenCalledWith(expect.objectContaining({
+      accountId: 'account-b',
+      to: 'receiver@example.com',
+      subject: '多账户发件测试',
+    }));
+  }, 15_000);
+
+  it('HTML 纯文本正文可阅读，回复保留原邮件线程与收件账户', () => {
+    const message: Message = {
+      id: 'message-1',
+      accountId: 'account-b',
+      mailboxId: 'mailbox-b',
+      threadId: 'thread-1',
+      messageId: '<message-1@example.com>',
+      subject: '只含 HTML 的邮件',
+      normalizedSubject: '只含 html 的邮件',
+      from: { name: 'Sender', email: 'sender@example.com' },
+      to: [
+        { email: 'second@163.com' },
+        { email: 'colleague@example.com' },
+      ],
+      date: '2026-09-03T00:00:00Z',
+      preview: '短预览',
+      bodyHtmlText: '完整安全文本正文',
+      isRead: true,
+      isStarred: false,
+      hasAttachment: false,
+      labels: [],
+    };
+
+    render(<Reader message={message} accountEmail="second@163.com" />);
+
+    expect(screen.getByText('完整安全文本正文')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: '回复' }));
+    expect(useUiStore.getState().composeDraft).toEqual(expect.objectContaining({
+      accountId: 'account-b',
+      inReplyTo: '<message-1@example.com>',
+      references: ['<message-1@example.com>'],
+      to: 'sender@example.com',
+    }));
+  });
+});

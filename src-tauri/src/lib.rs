@@ -16,7 +16,15 @@ use std::fs;
 use tauri::Manager;
 
 pub fn run() {
-    let result = tauri::Builder::default()
+    let builder = tauri::Builder::default().plugin(tauri_plugin_single_instance::init(
+        |app, _arguments, _working_directory| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        },
+    ));
+    let result = builder
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -26,12 +34,21 @@ pub fn run() {
             let database_path = data_dir.join("mutsumi-mail.sqlite3");
             let state = app_state::AppState::open(&database_path)
                 .map_err(|error| Box::new(error) as Box<dyn Error>)?;
+            let queued_outbox_ids = state
+                .database
+                .lock()
+                .map_err(|_| errors::AppError::Internal("database lock poisoned".into()))?
+                .queued_outbox_ids()?;
             app.manage(state);
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
                 .with_target(false)
                 .try_init()
                 .ok();
+            let app_handle = app.handle().clone();
+            for outbox_id in queued_outbox_ids {
+                application::compose_service::spawn_delivery(app_handle.clone(), outbox_id);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

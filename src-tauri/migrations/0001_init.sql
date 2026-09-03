@@ -183,6 +183,25 @@ CREATE TABLE IF NOT EXISTS outbox (
   updated_at TEXT NOT NULL
 );
 
+-- The RFC 822 bytes used for SMTP are immutable once an item enters the
+-- outbox.  Keeping them beside the queue record gives every explicit retry the
+-- same Message-ID and makes a later, provider-approved IMAP APPEND use the
+-- exact message that was delivered instead of rebuilding a look-alike.
+CREATE TABLE IF NOT EXISTS outbox_payloads (
+  outbox_id TEXT PRIMARY KEY NOT NULL REFERENCES outbox(id) ON DELETE CASCADE,
+  envelope_from TEXT NOT NULL,
+  recipients_json TEXT NOT NULL,
+  mime BLOB NOT NULL,
+  rfc_message_id TEXT NOT NULL,
+  sent_copy_state TEXT NOT NULL DEFAULT 'not_started'
+    CHECK (sent_copy_state IN ('not_started', 'awaiting_server_sync', 'confirmed', 'unavailable', 'failed')),
+  sent_copy_error_message TEXT,
+  sent_copy_uid_validity INTEGER,
+  sent_copy_uid INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS pending_operations (
   id TEXT PRIMARY KEY NOT NULL,
   account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -238,19 +257,47 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
   VALUES (NEW.id, NEW.subject, '', '', COALESCE(NEW.body_text, ''), COALESCE(NEW.body_html_text, ''), '');
 END;
 
-CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE OF subject, body_text, body_html_text ON messages BEGIN
+DROP TRIGGER IF EXISTS messages_fts_au;
+CREATE TRIGGER messages_fts_au AFTER UPDATE OF subject, body_text, body_html_text ON messages BEGIN
   DELETE FROM message_fts WHERE message_id = OLD.id;
   INSERT INTO message_fts(message_id, subject, sender, recipients, plain_body, html_text, attachment_filename)
-  VALUES (NEW.id, NEW.subject, '', '', COALESCE(NEW.body_text, ''), COALESCE(NEW.body_html_text, ''), '');
+  VALUES (
+    NEW.id,
+    NEW.subject,
+    COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = NEW.id AND kind = 'from'), ''),
+    COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = NEW.id AND kind IN ('to', 'cc', 'bcc')), ''),
+    COALESCE(NEW.body_text, ''),
+    COALESCE(NEW.body_html_text, ''),
+    ''
+  );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
   DELETE FROM message_fts WHERE message_id = OLD.id;
 END;
 
+CREATE TRIGGER IF NOT EXISTS message_addresses_fts_ai AFTER INSERT ON message_addresses BEGIN
+  UPDATE message_fts
+  SET sender = COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = NEW.message_id AND kind = 'from'), ''),
+      recipients = COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = NEW.message_id AND kind IN ('to', 'cc', 'bcc')), '')
+  WHERE message_id = NEW.message_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS message_addresses_fts_ad AFTER DELETE ON message_addresses BEGIN
+  UPDATE message_fts
+  SET sender = COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = OLD.message_id AND kind = 'from'), ''),
+      recipients = COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = OLD.message_id AND kind IN ('to', 'cc', 'bcc')), '')
+  WHERE message_id = OLD.message_id;
+END;
+
+UPDATE message_fts
+SET sender = COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = message_fts.message_id AND kind = 'from'), ''),
+    recipients = COALESCE((SELECT group_concat(COALESCE(display_name, '') || ' ' || email, ' ') FROM message_addresses WHERE message_id = message_fts.message_id AND kind IN ('to', 'cc', 'bcc')), '');
+
 CREATE INDEX IF NOT EXISTS idx_mailboxes_account_role ON mailboxes(account_id, special_role);
 CREATE INDEX IF NOT EXISTS idx_messages_account_date ON messages(account_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_instances_mailbox_uid ON message_instances(mailbox_id, uid);
+CREATE INDEX IF NOT EXISTS idx_outbox_payloads_sent_reconcile ON outbox_payloads(sent_copy_state, rfc_message_id);
 CREATE INDEX IF NOT EXISTS idx_instances_message ON message_instances(message_id);
 CREATE INDEX IF NOT EXISTS idx_pending_state ON pending_operations(state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_outbox_state ON outbox(state, next_attempt_at);

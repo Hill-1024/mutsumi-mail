@@ -1,12 +1,14 @@
 use crate::app_state::AppState;
+use crate::application::sync_service;
 use crate::backends::outgoing::{OutgoingError, OutgoingMailBackend, SendResult};
 use crate::backends::smtp::SmtpOutgoingBackend;
 use crate::domain::{DraftInput, OutboxItem};
 use crate::errors::AppError;
-use crate::storage::database::OutboxDraft;
+use crate::storage::database::{OutboxDraft, PreparedOutboxPayload};
 use lettre::message::header::ContentType;
 use lettre::Message;
 use tauri::{AppHandle, Emitter, Manager};
+use uuid::Uuid;
 
 pub fn save_draft(state: &AppState, input: DraftInput) -> Result<serde_json::Value, AppError> {
     let id = state
@@ -23,11 +25,14 @@ pub fn queue_draft(state: &AppState, input: DraftInput) -> Result<serde_json::Va
 }
 
 pub fn queue_draft_id(state: &AppState, input: DraftInput) -> Result<String, AppError> {
+    // Fail synchronously for deterministic errors. The command must not return a queued
+    // success for an invalid recipient, broken MIME, disabled account, or missing SMTP secret.
+    let prepared = prepare_delivery(state, &draft_from_input(&input))?;
     state
         .database
         .lock()
         .map_err(|_| AppError::Internal("database lock poisoned".into()))?
-        .queue_draft(&input)
+        .queue_prepared_draft(&input, &prepared.payload)
 }
 
 pub fn list_outbox(
@@ -49,6 +54,24 @@ pub fn spawn_delivery(app: AppHandle, outbox_id: String) {
 
 async fn deliver_outbox(app: AppHandle, outbox_id: String) {
     let state = app.state::<AppState>();
+    let claimed = match state
+        .database
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))
+        .and_then(|mut database| database.claim_outbox_for_sending(&outbox_id))
+    {
+        Ok(claimed) => claimed,
+        Err(error) => {
+            tracing::error!(outbox_id = %outbox_id, error = %error, "unable to claim outbox item");
+            return;
+        }
+    };
+    if !claimed {
+        tracing::debug!(outbox_id = %outbox_id, "outbox item is no longer queued; duplicate delivery skipped");
+        return;
+    }
+    emit_outbox_changed(&app, &outbox_id, "sending");
+
     let draft = match state
         .database
         .lock()
@@ -57,24 +80,112 @@ async fn deliver_outbox(app: AppHandle, outbox_id: String) {
     {
         Ok(draft) => draft,
         Err(error) => {
-            let _ = persist_delivery_error(&state, &outbox_id, &error, "failed");
-            emit_outbox_changed(&app, &outbox_id, "failed");
+            persist_error_and_emit(&app, &state, &outbox_id, &error, "failed");
             return;
         }
     };
-    let (config, secret, envelope_from) = match outgoing_session(&state, &draft) {
-        Ok(session) => session,
+    let prepared = match prepare_claimed_delivery(&state, &outbox_id, &draft) {
+        Ok(prepared) => prepared,
         Err(error) => {
-            let _ = persist_delivery_error(&state, &outbox_id, &error, "failed");
-            emit_outbox_changed(&app, &outbox_id, "failed");
+            persist_error_and_emit(&app, &state, &outbox_id, &error, "failed");
             return;
         }
     };
-    if let Err(error) = set_state(&state, &outbox_id, "sending", None, None) {
-        tracing::warn!(outbox_id = %outbox_id, error = %error, "unable to mark outbox item as sending");
-        return;
+    let policy = sent_copy_policy(&prepared.config);
+    let result = SmtpOutgoingBackend::new(prepared.config)
+        .send_mime(
+            &prepared.secret,
+            prepared.payload.mime,
+            &prepared.payload.envelope_from,
+            &prepared.payload.recipients,
+        )
+        .await;
+    match result {
+        Ok(SendResult::Sent { .. }) => {
+            if let Some(sent_copy_state) = persist_sent_and_emit(&app, &state, &outbox_id, policy) {
+                if sent_copy_state == "awaiting_server_sync" {
+                    match sync_service::start_sync_if_idle(
+                        &state,
+                        app.clone(),
+                        draft.account_id.clone(),
+                    ) {
+                        Ok(Some(_)) => tracing::debug!(
+                            account_id = %draft.account_id,
+                            outbox_id = %outbox_id,
+                            "started IMAP reconciliation for a confirmed SMTP delivery"
+                        ),
+                        Ok(None) => tracing::debug!(
+                            account_id = %draft.account_id,
+                            outbox_id = %outbox_id,
+                            "existing IMAP sync will reconcile the confirmed SMTP delivery"
+                        ),
+                        Err(error) => tracing::warn!(
+                            account_id = %draft.account_id,
+                            outbox_id = %outbox_id,
+                            error = %error,
+                            "SMTP delivery succeeded but Sent reconciliation could not start"
+                        ),
+                    }
+                }
+            }
+        }
+        Ok(SendResult::OutcomeUnknown) => {
+            let error = AppError::AmbiguousSend;
+            persist_error_and_emit(&app, &state, &outbox_id, &error, "outcome_unknown");
+        }
+        Ok(SendResult::Failed) => {
+            let error = AppError::ServerRejected("SMTP 发送失败".into());
+            persist_error_and_emit(&app, &state, &outbox_id, &error, "failed");
+        }
+        Err(error) => {
+            let app_error = map_outgoing_error(error);
+            let state_name = if matches!(app_error, AppError::AmbiguousSend) {
+                "outcome_unknown"
+            } else {
+                "failed"
+            };
+            persist_error_and_emit(&app, &state, &outbox_id, &app_error, state_name);
+        }
     }
-    emit_outbox_changed(&app, &outbox_id, "sending");
+}
+
+struct PreparedDelivery {
+    config: crate::backends::outgoing::OutgoingConfig,
+    secret: String,
+    payload: PreparedOutboxPayload,
+}
+
+/// SMTP does not say whether a provider filed a Sent copy. Gmail documents
+/// server-managed copies, while QQ exposes a server-side switch; neither is
+/// safe for an unconditional client APPEND. Unknown providers are treated the
+/// same way until the user explicitly chooses a client-managed policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SentCopyPolicy {
+    ServerManaged,
+    ServerSettingDependent,
+    Unknown,
+}
+
+fn sent_copy_policy(config: &crate::backends::outgoing::OutgoingConfig) -> SentCopyPolicy {
+    let host = config
+        .host
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if matches!(host.as_str(), "smtp.gmail.com" | "smtp.googlemail.com") {
+        SentCopyPolicy::ServerManaged
+    } else if host == "smtp.qq.com" || host == "smtp.exmail.qq.com" {
+        SentCopyPolicy::ServerSettingDependent
+    } else {
+        SentCopyPolicy::Unknown
+    }
+}
+
+fn prepare_delivery(state: &AppState, draft: &OutboxDraft) -> Result<PreparedDelivery, AppError> {
+    let (config, secret, envelope_from) = outgoing_session(state, draft)?;
+    SmtpOutgoingBackend::new(config.clone())
+        .validate_configuration(&secret)
+        .map_err(map_outgoing_error)?;
     let recipients = draft
         .to
         .iter()
@@ -82,43 +193,68 @@ async fn deliver_outbox(app: AppHandle, outbox_id: String) {
         .chain(draft.bcc.iter())
         .cloned()
         .collect::<Vec<_>>();
-    let mime = match build_plain_mime(&draft, &envelope_from, &recipients) {
-        Ok(mime) => mime,
-        Err(error) => {
-            let _ = persist_delivery_error(&state, &outbox_id, &error, "failed");
-            emit_outbox_changed(&app, &outbox_id, "failed");
-            return;
-        }
-    };
-    let result = SmtpOutgoingBackend::new(config)
-        .send_mime(&secret, mime, &envelope_from, &recipients)
-        .await;
-    match result {
-        Ok(SendResult::Sent { .. }) => {
-            let _ = set_state(&state, &outbox_id, "sent", None, None);
-            emit_outbox_changed(&app, &outbox_id, "sent");
-        }
-        Ok(SendResult::OutcomeUnknown) => {
-            let error = AppError::AmbiguousSend;
-            let _ = persist_delivery_error(&state, &outbox_id, &error, "outcome_unknown");
-            emit_outbox_changed(&app, &outbox_id, "outcome_unknown");
-        }
-        Ok(SendResult::Failed) => {
-            let error = AppError::ServerRejected("SMTP 发送失败".into());
-            let _ = persist_delivery_error(&state, &outbox_id, &error, "failed");
-            emit_outbox_changed(&app, &outbox_id, "failed");
-        }
-        Err(error) => {
-            let app_error = map_outgoing_error(error);
-            let state_name = if matches!(app_error, AppError::Network(_)) {
-                "queued"
-            } else {
-                "failed"
-            };
-            let _ = persist_delivery_error(&state, &outbox_id, &app_error, state_name);
-            emit_outbox_changed(&app, &outbox_id, state_name);
-        }
+    let rfc_message_id = new_message_id(&envelope_from);
+    let mime = build_plain_mime(draft, &envelope_from, &recipients, &rfc_message_id)?;
+    Ok(PreparedDelivery {
+        config,
+        secret,
+        payload: PreparedOutboxPayload {
+            envelope_from,
+            recipients,
+            mime,
+            rfc_message_id,
+            sent_copy_state: "not_started".into(),
+            sent_copy_error_message: None,
+            sent_copy_uid_validity: None,
+            sent_copy_uid: None,
+        },
+    })
+}
+
+fn prepare_claimed_delivery(
+    state: &AppState,
+    outbox_id: &str,
+    draft: &OutboxDraft,
+) -> Result<PreparedDelivery, AppError> {
+    let mut prepared = prepare_delivery(state, draft)?;
+    let payload = state
+        .database
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
+        .store_outbox_payload_if_missing(outbox_id, &prepared.payload)?;
+    prepared.payload = payload;
+    Ok(prepared)
+}
+
+fn new_message_id(envelope_from: &str) -> String {
+    let domain = envelope_from
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim())
+        .filter(|domain| !domain.is_empty())
+        .unwrap_or("mail.invalid");
+    format!("<{}@{}>", Uuid::new_v4(), domain)
+}
+
+fn draft_from_input(input: &DraftInput) -> OutboxDraft {
+    OutboxDraft {
+        account_id: input.account_id.clone(),
+        to: split_recipient_field(&input.to),
+        cc: split_recipient_field(input.cc.as_deref().unwrap_or("")),
+        bcc: split_recipient_field(input.bcc.as_deref().unwrap_or("")),
+        subject: input.subject.clone(),
+        body_text: input.body_text.clone(),
+        in_reply_to: input.in_reply_to.clone(),
+        references: input.references.clone().unwrap_or_default(),
     }
+}
+
+fn split_recipient_field(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|recipient| !recipient.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 fn outgoing_session(
@@ -130,13 +266,7 @@ fn outgoing_session(
             .database
             .lock()
             .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
-        let refs = database.account_secret_refs(&draft.account_id)?;
-        (
-            database.outgoing_config(&draft.account_id)?,
-            refs.1
-                .ok_or_else(|| AppError::Capability("该账号没有发件端点".into()))?,
-            database.account_email(&draft.account_id)?,
-        )
+        database.outgoing_delivery_details(&draft.account_id)?
     };
     let secret = state
         .secret_store
@@ -149,12 +279,14 @@ fn build_plain_mime(
     draft: &OutboxDraft,
     envelope_from: &str,
     recipients: &[String],
+    rfc_message_id: &str,
 ) -> Result<Vec<u8>, AppError> {
     let mut builder =
         Message::builder()
             .from(envelope_from.parse().map_err(|error| {
                 AppError::InvalidConfiguration(format!("发件人地址无效：{error}"))
             })?)
+            .message_id(Some(rfc_message_id.to_owned()))
             .subject(&draft.subject)
             .header(ContentType::TEXT_PLAIN);
     for recipient in &draft.to {
@@ -172,6 +304,12 @@ fn build_plain_mime(
             builder.bcc(recipient.parse().map_err(|error| {
                 AppError::InvalidConfiguration(format!("密送地址无效：{error}"))
             })?);
+    }
+    if let Some(in_reply_to) = &draft.in_reply_to {
+        builder = builder.in_reply_to(in_reply_to.clone());
+    }
+    if !draft.references.is_empty() {
+        builder = builder.references(draft.references.join(" "));
     }
     if recipients.is_empty() {
         return Err(AppError::InvalidConfiguration("至少需要一个收件人".into()));
@@ -217,6 +355,65 @@ fn persist_delivery_error(
     )
 }
 
+fn persist_sent_and_emit(
+    app: &AppHandle,
+    state: &AppState,
+    outbox_id: &str,
+    policy: SentCopyPolicy,
+) -> Option<String> {
+    let persisted = state
+        .database
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))
+        .and_then(|mut database| database.complete_outbox_sent(outbox_id));
+    match persisted {
+        Ok(sent_copy_state) => {
+            let _ = app.emit(
+                "outbox-changed",
+                serde_json::json!({
+                    "outboxId": outbox_id,
+                    "state": "sent",
+                    "sentCopyState": sent_copy_state,
+                }),
+            );
+            tracing::debug!(
+                outbox_id = %outbox_id,
+                ?policy,
+                sent_copy_state = %sent_copy_state,
+                "SMTP delivery persisted; remote Sent copy will be reconciled without an unconditional APPEND"
+            );
+            Some(sent_copy_state)
+        }
+        Err(error) => {
+            tracing::error!(
+                outbox_id = %outbox_id,
+                requested_state = "sent",
+                error = %error,
+                "outbox state was not persisted; success event suppressed"
+            );
+            None
+        }
+    }
+}
+
+fn persist_error_and_emit(
+    app: &AppHandle,
+    state: &AppState,
+    outbox_id: &str,
+    error: &AppError,
+    state_name: &str,
+) {
+    match persist_delivery_error(state, outbox_id, error, state_name) {
+        Ok(()) => emit_outbox_changed(app, outbox_id, state_name),
+        Err(persist_error) => tracing::error!(
+            outbox_id = %outbox_id,
+            requested_state = state_name,
+            error = %persist_error,
+            "outbox error state was not persisted; event suppressed"
+        ),
+    }
+}
+
 fn emit_outbox_changed(app: &AppHandle, outbox_id: &str, state: &str) {
     let _ = app.emit(
         "outbox-changed",
@@ -236,7 +433,12 @@ fn map_outgoing_error(error: OutgoingError) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::build_plain_mime;
+    use super::{
+        build_plain_mime, draft_from_input, new_message_id, sent_copy_policy, SentCopyPolicy,
+    };
+    use crate::backends::outgoing::OutgoingConfig;
+    use crate::domain::DraftInput;
+    use crate::errors::AppError;
     use crate::storage::database::OutboxDraft;
 
     #[test]
@@ -248,6 +450,8 @@ mod tests {
             bcc: vec!["bcc@example.com".into()],
             subject: "离线草稿".into(),
             body_text: "正文".into(),
+            in_reply_to: Some("<parent@example.com>".into()),
+            references: vec!["<root@example.com>".into(), "<parent@example.com>".into()],
         };
         let mime = build_plain_mime(
             &draft,
@@ -257,12 +461,102 @@ mod tests {
                 "cc@example.com".into(),
                 "bcc@example.com".into(),
             ],
+            "<stable-message@example.com>",
         )
         .expect("mime");
         let text = String::from_utf8_lossy(&mime);
         assert!(text.contains("Subject:"));
         assert!(text.contains("To: to@example.com"));
+        assert!(text.contains("In-Reply-To: <parent@example.com>"));
+        assert!(text.contains("References: <root@example.com> <parent@example.com>"));
+        assert!(text.contains("Message-ID: <stable-message@example.com>"));
         assert!(!text.contains("Bcc:"));
         assert!(text.ends_with("\r\n"));
+    }
+
+    #[test]
+    fn rejects_missing_or_invalid_recipients_before_queueing() {
+        let no_recipients = OutboxDraft {
+            account_id: "account".into(),
+            to: vec![],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Subject".into(),
+            body_text: "Body".into(),
+            in_reply_to: None,
+            references: Vec::new(),
+        };
+        assert!(matches!(
+            build_plain_mime(
+                &no_recipients,
+                "from@example.com",
+                &[],
+                "<empty@example.com>"
+            ),
+            Err(AppError::InvalidConfiguration(_))
+        ));
+
+        let invalid = OutboxDraft {
+            to: vec!["not-an-email".into()],
+            ..no_recipients
+        };
+        assert!(matches!(
+            build_plain_mime(
+                &invalid,
+                "from@example.com",
+                &["not-an-email".into()],
+                "<invalid@example.com>"
+            ),
+            Err(AppError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn queue_preflight_uses_the_same_recipient_split_as_storage() {
+        let draft = draft_from_input(&DraftInput {
+            id: None,
+            account_id: "account".into(),
+            to: "first@example.com, second@example.com".into(),
+            cc: Some("  ".into()),
+            bcc: None,
+            subject: "Subject".into(),
+            body_text: "Body".into(),
+            in_reply_to: None,
+            references: None,
+        });
+        assert_eq!(draft.to, vec!["first@example.com", "second@example.com"]);
+        assert!(draft.cc.is_empty());
+        assert!(draft.bcc.is_empty());
+    }
+
+    #[test]
+    fn generated_message_id_uses_the_sender_domain() {
+        let id = new_message_id("sender@example.com");
+        assert!(id.starts_with('<'));
+        assert!(id.ends_with("@example.com>"));
+    }
+
+    #[test]
+    fn sent_copy_policy_never_assumes_client_append_is_safe() {
+        let config = |host: &str| OutgoingConfig {
+            protocol: "smtp".into(),
+            host: host.into(),
+            port: 465,
+            tls_mode: "implicit".into(),
+            auth_method: "password".into(),
+            username: "sender@example.com".into(),
+        };
+        assert_eq!(
+            sent_copy_policy(&config("smtp.gmail.com")),
+            SentCopyPolicy::ServerManaged
+        );
+        assert_eq!(
+            sent_copy_policy(&config("SMTP.QQ.COM.")),
+            SentCopyPolicy::ServerSettingDependent
+        );
+        assert_eq!(
+            sent_copy_policy(&config("smtp.example.com")),
+            SentCopyPolicy::Unknown
+        );
     }
 }

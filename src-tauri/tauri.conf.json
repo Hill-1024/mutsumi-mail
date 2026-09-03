@@ -17,8 +17,8 @@
         "title": "Mutsumi Mail",
         "width": 1320,
         "height": 820,
-        "minWidth": 920,
-        "minHeight": 620,
+        "minWidth": 360,
+        "minHeight": 480,
         "resizable": true,
         "fullscreen": false
       }

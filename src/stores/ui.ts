@@ -1,40 +1,73 @@
 import { create } from 'zustand';
 import type { ThemeMode } from '../types';
 
+const THEME_STORAGE_KEY = 'mutsumi_theme_mode';
+
+const getInitialTheme = (): ThemeMode => {
+  if (typeof window === 'undefined') return 'dark';
+  const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+  if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
+  return 'dark';
+};
+
+export interface ComposeDraftState {
+  accountId?: string;
+  to?: string;
+  cc?: string;
+  bcc?: string;
+  subject?: string;
+  bodyText?: string;
+  inReplyTo?: string;
+  references?: string[];
+}
+
 interface UiState {
   themeMode: ThemeMode;
-  isOffline: boolean;
+  safeReading: boolean;
   selectedMailboxId: string;
   selectedMessageId: string | null;
   searchOpen: boolean;
   composeOpen: boolean;
+  composeDraft: ComposeDraftState | null;
   navPage: 'mail' | 'search' | 'outbox' | 'settings';
   syncMessage: string | null;
   setThemeMode: (themeMode: ThemeMode) => void;
-  toggleOffline: () => void;
+  toggleSafeReading: () => void;
+  setSafeReading: (value: boolean) => void;
   selectMailbox: (id: string) => void;
   selectMessage: (id: string | null) => void;
   setSearchOpen: (value: boolean) => void;
   setComposeOpen: (value: boolean) => void;
+  openComposeWithDraft: (draft: ComposeDraftState) => void;
+  clearComposeDraft: () => void;
   setNavPage: (page: UiState['navPage']) => void;
   setSyncMessage: (message: string | null) => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
-  themeMode: 'dark',
-  isOffline: false,
+  themeMode: getInitialTheme(),
+  safeReading: true,
   selectedMailboxId: 'inbox',
   selectedMessageId: null,
   searchOpen: false,
   composeOpen: false,
+  composeDraft: null,
   navPage: 'mail',
   syncMessage: null,
-  setThemeMode: (themeMode) => set({ themeMode }),
-  toggleOffline: () => set((state) => ({ isOffline: !state.isOffline })),
+  setThemeMode: (themeMode) => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+    }
+    set({ themeMode });
+  },
+  toggleSafeReading: () => set((state) => ({ safeReading: !state.safeReading })),
+  setSafeReading: (safeReading) => set({ safeReading }),
   selectMailbox: (selectedMailboxId) => set({ selectedMailboxId, navPage: 'mail', selectedMessageId: null }),
   selectMessage: (selectedMessageId) => set({ selectedMessageId }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
-  setComposeOpen: (composeOpen) => set({ composeOpen }),
-  setNavPage: (navPage) => set({ navPage, selectedMessageId: null }),
+  setComposeOpen: (composeOpen) => set((state) => ({ composeOpen, composeDraft: composeOpen ? state.composeDraft : null })),
+  openComposeWithDraft: (composeDraft) => set({ composeDraft, composeOpen: true }),
+  clearComposeDraft: () => set({ composeDraft: null }),
+  setNavPage: (navPage) => set({ navPage }),
   setSyncMessage: (syncMessage) => set({ syncMessage }),
 }));

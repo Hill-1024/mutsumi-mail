@@ -88,6 +88,13 @@ pub struct OutboxItem {
     pub subject: String,
     pub recipients: Vec<String>,
     pub state: String,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+    /// Delivery and server-side filing are separate facts. `sent` means SMTP
+    /// accepted the message; this field says whether a real remote Sent copy
+    /// has subsequently been observed.
+    pub sent_copy_state: Option<String>,
+    pub sent_copy_error_message: Option<String>,
     pub updated_at: String,
 }
 

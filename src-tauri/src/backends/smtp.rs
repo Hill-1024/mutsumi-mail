@@ -1,6 +1,9 @@
 use lettre::address::{Address, Envelope};
+use lettre::message::Mailbox;
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::Error as SmtpError;
 use lettre::{SmtpTransport, Transport};
+use std::time::Duration;
 
 use super::outgoing::{OutgoingConfig, OutgoingError, OutgoingMailBackend, SendResult};
 use crate::domain::capabilities::ProviderCapabilities;
@@ -13,6 +16,10 @@ impl SmtpOutgoingBackend {
     pub fn new(config: OutgoingConfig) -> Self {
         Self { config }
     }
+
+    pub fn validate_configuration(&self, secret: &str) -> Result<(), OutgoingError> {
+        transport(&self.config, secret).map(|_| ())
+    }
 }
 
 #[async_trait::async_trait]
@@ -23,7 +30,9 @@ impl OutgoingMailBackend for SmtpOutgoingBackend {
 
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            append_sent: true,
+            // SMTP transports a message; saving a copy requires the incoming backend's
+            // APPEND support and is not performed by this backend.
+            append_sent: false,
             smtp_utf8: true,
             ..Default::default()
         }
@@ -52,14 +61,19 @@ impl OutgoingMailBackend for SmtpOutgoingBackend {
             send_smtp(&config, &secret, mime, &envelope_from, &recipients)
         })
         .await
-        .map_err(|error| OutgoingError::Network(error.to_string()))?
+        // A blocking worker failure does not tell us whether it happened before or after
+        // the server accepted DATA. Keep the result ambiguous to avoid an automatic duplicate.
+        .map_err(|_error| OutgoingError::AmbiguousSend)?
     }
 }
 
 fn transport(config: &OutgoingConfig, secret: &str) -> Result<SmtpTransport, OutgoingError> {
-    if config.host.trim().is_empty() || config.username.trim().is_empty() || secret.is_empty() {
-        return Err(OutgoingError::Rejected(
-            "SMTP endpoint or credential is incomplete".into(),
+    if secret.is_empty() {
+        return Err(OutgoingError::Authentication);
+    }
+    if config.host.trim().is_empty() || config.port == 0 || config.username.trim().is_empty() {
+        return Err(OutgoingError::Unsupported(
+            "SMTP 发件服务器配置不完整".into(),
         ));
     }
     if config.protocol != "smtp" {
@@ -86,18 +100,21 @@ fn transport(config: &OutgoingConfig, secret: &str) -> Result<SmtpTransport, Out
         SmtpTransport::relay(&config.host)
     }
     .map_err(|error| OutgoingError::Tls(error.to_string()))?;
-    Ok(builder.port(config.port).credentials(credentials).build())
+    Ok(builder
+        .port(config.port)
+        .credentials(credentials)
+        .timeout(Some(Duration::from_secs(20)))
+        .build())
 }
 
 fn test_smtp(config: &OutgoingConfig, secret: &str) -> Result<(), OutgoingError> {
     let transport = transport(config, secret)?;
-    transport
+    let connected = transport
         .test_connection()
-        .map(|_| ())
-        .map_err(|error| classify_smtp_error(&error.to_string()))
+        .map_err(|error| classify_smtp_error(&error))?;
+    ensure_connection_confirmed(connected)
 }
 
-#[allow(dead_code)]
 fn send_smtp(
     config: &OutgoingConfig,
     secret: &str,
@@ -108,37 +125,141 @@ fn send_smtp(
     let sender = envelope_from
         .parse::<Address>()
         .map_err(|error| OutgoingError::Rejected(format!("invalid sender: {error}")))?;
-    let recipients = recipients
-        .iter()
-        .map(|recipient| {
-            recipient
-                .parse::<Address>()
-                .map_err(|error| OutgoingError::Rejected(format!("invalid recipient: {error}")))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let envelope = Envelope::new(Some(sender), recipients)
+    let mut envelope_recipients = Vec::new();
+    for recipient in recipients {
+        let address = recipient
+            .parse::<Mailbox>()
+            .map(|mailbox| mailbox.email)
+            .map_err(|error| OutgoingError::Rejected(format!("invalid recipient: {error}")))?;
+        if !envelope_recipients.contains(&address) {
+            envelope_recipients.push(address);
+        }
+    }
+    if envelope_recipients.is_empty() {
+        return Err(OutgoingError::Rejected(
+            "at least one recipient is required".into(),
+        ));
+    }
+    let envelope = Envelope::new(Some(sender), envelope_recipients)
         .map_err(|error| OutgoingError::Rejected(format!("invalid SMTP envelope: {error}")))?;
     let transport = transport(config, secret)?;
+    let connected = transport
+        .test_connection()
+        .map_err(|error| classify_smtp_error(&error))?;
+    ensure_connection_confirmed(connected)?;
     match transport.send_raw(&envelope, &mime) {
         Ok(_) => Ok(SendResult::Sent { remote_id: None }),
-        Err(error) => {
-            let text = error.to_string();
-            if text.contains("connection") {
-                Ok(SendResult::OutcomeUnknown)
-            } else {
-                Err(classify_smtp_error(&text))
-            }
-        }
+        Err(error) => Err(classify_send_error(&error)),
     }
 }
 
-fn classify_smtp_error(text: &str) -> OutgoingError {
-    let lower = text.to_ascii_lowercase();
-    if lower.contains("auth") || lower.contains("credential") || lower.contains("535") {
-        OutgoingError::Authentication
-    } else if lower.contains("timed out") || lower.contains("timeout") {
-        OutgoingError::Network("SMTP connection timed out".into())
+fn ensure_connection_confirmed(connected: bool) -> Result<(), OutgoingError> {
+    if connected {
+        Ok(())
     } else {
-        OutgoingError::Rejected("SMTP server rejected the operation".into())
+        Err(OutgoingError::Rejected(
+            "SMTP server did not confirm the connection".into(),
+        ))
+    }
+}
+
+fn classify_smtp_error(error: &SmtpError) -> OutgoingError {
+    let text = error.to_string();
+    let lower = text.to_ascii_lowercase();
+    let status = error.status().map(|code| code.to_string());
+    if is_authentication_failure(status.as_deref(), &lower) {
+        OutgoingError::Authentication
+    } else if error.is_tls() {
+        OutgoingError::Tls("SMTP TLS negotiation failed".into())
+    } else if error.is_timeout() || lower.contains("timed out") || lower.contains("timeout") {
+        OutgoingError::Network("SMTP connection timed out".into())
+    } else if error.is_transient() {
+        OutgoingError::Network(match status {
+            Some(status) => format!("SMTP server temporarily unavailable ({status})"),
+            None => "SMTP server temporarily unavailable".into(),
+        })
+    } else if error.is_permanent() || error.is_client() {
+        OutgoingError::Rejected(match status {
+            Some(status) => format!("SMTP server rejected the operation ({status})"),
+            None => "SMTP server rejected the operation".into(),
+        })
+    } else {
+        OutgoingError::Network("SMTP connection failed".into())
+    }
+}
+
+fn classify_send_error(error: &SmtpError) -> OutgoingError {
+    if error.is_permanent() || error.is_transient() || error.is_client() || error.is_tls() {
+        return classify_smtp_error(error);
+    }
+
+    // lettre does not expose which SMTP command failed. Once send_raw starts, a
+    // timeout/connection loss may happen after DATA was accepted, so treating it as a
+    // normal retryable network failure could duplicate mail.
+    OutgoingError::AmbiguousSend
+}
+
+fn is_authentication_failure(status: Option<&str>, lower_message: &str) -> bool {
+    matches!(status, Some("530" | "534" | "535"))
+        || lower_message.contains("auth")
+        || lower_message.contains("credential")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_connection_confirmed, is_authentication_failure, SmtpOutgoingBackend};
+    use crate::backends::outgoing::{OutgoingConfig, OutgoingError};
+
+    fn config() -> OutgoingConfig {
+        OutgoingConfig {
+            protocol: "smtp".into(),
+            host: "smtp.example.com".into(),
+            port: 465,
+            tls_mode: "implicit".into(),
+            auth_method: "password".into(),
+            username: "sender@example.com".into(),
+        }
+    }
+
+    #[test]
+    fn negative_noop_result_is_not_a_success() {
+        assert!(matches!(
+            ensure_connection_confirmed(false),
+            Err(OutgoingError::Rejected(_))
+        ));
+        assert!(ensure_connection_confirmed(true).is_ok());
+    }
+
+    #[test]
+    fn deterministic_configuration_errors_are_rejected_before_network_io() {
+        let mut invalid = config();
+        invalid.tls_mode = "none".into();
+        assert!(matches!(
+            SmtpOutgoingBackend::new(invalid).validate_configuration("secret"),
+            Err(OutgoingError::Unsupported(_))
+        ));
+
+        assert!(matches!(
+            SmtpOutgoingBackend::new(config()).validate_configuration(""),
+            Err(OutgoingError::Authentication)
+        ));
+
+        let mut invalid_port = config();
+        invalid_port.port = 0;
+        assert!(matches!(
+            SmtpOutgoingBackend::new(invalid_port).validate_configuration("secret"),
+            Err(OutgoingError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn common_authentication_statuses_are_classified_without_message_matching() {
+        for status in ["530", "534", "535"] {
+            assert!(is_authentication_failure(Some(status), "permanent error"));
+        }
+        assert!(!is_authentication_failure(
+            Some("550"),
+            "mailbox unavailable"
+        ));
     }
 }

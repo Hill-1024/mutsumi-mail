@@ -1,22 +1,24 @@
 # Mutsumi Mail
 
-Mutsumi Mail 是一个 Rust + Tauri v2 + React/Vite 的离线优先桌面邮件客户端骨架。邮件元数据、草稿、发件队列和同步游标由 Rust/SQLite 管理；前端只通过类型化 IPC 读取或提交意图。
+Mutsumi Mail 是一个 Rust + Tauri v2 + React/Vite 的离线优先桌面邮件客户端。邮件元数据、正文缓存、草稿、发件队列和同步游标由 Rust/SQLite 管理；前端只通过类型化 IPC 读取或提交意图。
 
 ## 当前实现
 
-- Material Design 3 token 层：深色/浅色主题、响应式桌面三栏与紧凑单栏布局。
-- Provider registry：QQ、网易 163、Generic IMAP/SMTP、Cloudflare Email Sending outbound-only preset。
-- Rust `IncomingMailBackend` / `OutgoingMailBackend` trait；QQ/163 的 IMAPS/SMTPS 配置集中管理。
+- Material Design 3 组件与 token：深色/浅色主题，以及手机、平板、桌面分别适配的单栏、双栏和三栏布局。
+- QQ、网易 163 和 Generic IMAP/SMTP 添加流程；只有 IMAP 与 SMTP 都验证成功后才保存账户，失败不会进入主界面或启动同步。
+- 多账户独立同步、统一收件箱、单账户范围切换，以及按收件账户回复和按所选账户发信。
+- 严格的 IMAP TLS/STARTTLS 会话、文件夹发现、UID 增量同步、历史回填、UIDVALIDITY 处理、正文按需获取和本地操作上传。
+- SMTP 发送前校验、持久化发件队列、稳定 Message-ID 与不可变 MIME 快照；结果不确定时不会盲目重发。
 - SQLite migration：accounts、mailboxes、messages、instances、drafts、outbox、pending operations、sync cursors、FTS5。
-- 系统 keyring-backed `SecretStore` 抽象；SQLite 只保留 `secret_ref`。
-- 本地虚拟化邮件列表、安全文本阅读模式、草稿自动保存、持久化 outbox 队列 UI；本地 FTS5 搜索 command 与 SQLite 触发器已就位。
-- IMAP TLS/CAPABILITY/LOGIN 探测（IMAPS 993 与 STARTTLS 143）与 SMTP TLS 连接测试代码；纯文本 MIME 发件会进入可持久化 outbox worker，真实账号仍需本机手工 smoke test。
+- 系统 keyring-backed `SecretStore` 抽象；SQLite 只保留 `secret_ref`，同一进程只向 macOS 钥匙串读取同一凭据一次。
+- 桌面单实例保护；重复打开只聚焦已有窗口，不会启动第二套同步任务或重复请求钥匙串授权。
+- 本地虚拟化邮件列表、安全文本阅读、草稿自动保存、可恢复发件队列和覆盖发件人/收件人的 FTS5 搜索。
 
 ## 运行
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm dev                 # 浏览器设计/交互预览（无 Tauri 时使用明确的本地演示数据）
+pnpm dev                 # 浏览器界面预览（账户、同步与发送必须在 Tauri 桌面运行时使用）
 pnpm tauri:dev           # 桌面运行，需要本机 Tauri 系统依赖
 ```
 
@@ -27,7 +29,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
-(cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
+(cd src-tauri && CARGO_INCREMENTAL=0 cargo fmt --check && CARGO_INCREMENTAL=0 cargo clippy --all-targets --all-features -- -D warnings && CARGO_INCREMENTAL=0 cargo test --all-targets --all-features)
 ```
 
 ## QQ / 163 设置
@@ -37,9 +39,9 @@ pnpm build
 - QQ：`imap.qq.com:993`（IMAPS）、`smtp.qq.com:465`（SMTPS）
 - 163：`imap.163.com:993`（IMAPS）、`smtp.163.com:465`（SMTPS）
 
-当前环境未提供真实授权码，因此不能声称 QQ/163 已完成真实收发验证。协议 smoke test 应使用本机凭据或测试服务器，并检查重启后离线读取、Sent 副本和重复同步。附件 MIME、Sent APPEND 和完整增量 FETCH 仍在后续切片。
+当前环境未提供真实授权码，因此不能声称 QQ/163 已完成真实收发验证。协议 smoke test 应使用本机凭据，并检查重启后离线读取、Sent 副本和重复同步。当前版本不支持附件编写、OAuth、POP3/JMAP 或后台 IDLE 推送。
 
-Cloudflare Email Sending 为 outbound-only：向导提供“只配置 Cloudflare 发件”入口，可填写自定义发件 identity。当前官方文档的 SMTP endpoint 是 `smtp.mx.cloudflare.net:465`、隐式 TLS，用户名固定为 `api_token`，密码为具备 Email Sending: Edit 权限的 API Token。它不提供收件文件夹。
+发送成功后会重新同步对应账户的 Sent 文件夹。客户端不会在未确认服务商策略时盲目 APPEND，以免和服务器自动保存产生重复邮件；界面会如实显示 Sent 副本仍待确认或当前不可用。
 
 ## 文档
 

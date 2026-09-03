@@ -10,6 +10,7 @@ pub struct ParsedMessage {
     pub in_reply_to: Option<String>,
     pub text: Option<String>,
     pub html_text: Option<String>,
+    pub preview: String,
     pub attachment_count: usize,
 }
 
@@ -33,6 +34,10 @@ pub fn parse_rfc822(raw: &[u8]) -> Option<ParsedMessage> {
     let html_text = message
         .body_html(0)
         .map(|value| crate::mime::sanitizer::html_to_safe_text(value.as_ref()));
+    let preview = message
+        .body_preview(240)
+        .map(|value| value.into_owned())
+        .unwrap_or_default();
     Some(ParsedMessage {
         subject,
         message_id,
@@ -40,6 +45,7 @@ pub fn parse_rfc822(raw: &[u8]) -> Option<ParsedMessage> {
         in_reply_to,
         text,
         html_text,
+        preview,
         attachment_count: message.attachments().count(),
     })
 }

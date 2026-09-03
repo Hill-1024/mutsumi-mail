@@ -41,9 +41,9 @@ pub fn provider_presets() -> Vec<ProviderPreset> {
         },
         ProviderPreset {
             id: "generic".into(), display_name: "通用 IMAP + SMTP".into(), email_domain_patterns: vec![],
-            incoming: Some(EndpointPreset { protocol: "imap".into(), host: String::new(), port: 993, tls_mode: "implicit".into(), auth_methods: vec!["password".into(), "oauth2".into(), "xoauth2".into()], username: None }),
-            outgoing: Some(EndpointPreset { protocol: "smtp".into(), host: String::new(), port: 465, tls_mode: "implicit".into(), auth_methods: vec!["password".into(), "oauth2".into(), "xoauth2".into()], username: None }),
-            help_text: "为标准邮件服务器手动填写收件和发件端点；两者凭据可以不同。".into(), capabilities: capabilities(true), quirks: vec![],
+            incoming: Some(EndpointPreset { protocol: "imap".into(), host: String::new(), port: 993, tls_mode: "implicit".into(), auth_methods: vec!["password".into()], username: None }),
+            outgoing: Some(EndpointPreset { protocol: "smtp".into(), host: String::new(), port: 465, tls_mode: "implicit".into(), auth_methods: vec!["password".into()], username: None }),
+            help_text: "为标准邮件服务器手动填写 IMAP 与 SMTP 端点。当前使用同一密码或授权码验证收发连接。".into(), capabilities: capabilities(true), quirks: vec![],
         },
         ProviderPreset {
             id: "cloudflare-smtp".into(), display_name: "Cloudflare Email Sending".into(), email_domain_patterns: vec!["cloudflare.email".into()],
@@ -73,13 +73,10 @@ fn smtp(host: &str, port: u16, tls_mode: &str, auth_method: &str) -> EndpointPre
         username: None,
     }
 }
-fn capabilities(folder_ops: bool) -> ProviderCapabilities {
+fn capabilities(_folder_ops: bool) -> ProviderCapabilities {
     ProviderCapabilities {
         folders: true,
         flags: true,
-        r#move: folder_ops,
-        append: folder_ops,
-        append_sent: folder_ops,
         partial_fetch: true,
         threading: true,
         smtp_utf8: true,

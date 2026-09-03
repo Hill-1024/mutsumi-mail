@@ -8,7 +8,7 @@ use crate::backends::{
     imap::ImapIncomingBackend, incoming::IncomingMailBackend, outgoing::OutgoingMailBackend,
     smtp::SmtpOutgoingBackend,
 };
-use crate::domain::{account::CreateAccountInput, DraftInput, Message, SyncStatus};
+use crate::domain::{account::CreateAccountInput, Account, DraftInput, Message, SyncStatus};
 use crate::errors::AppErrorDto;
 use crate::providers::registry::{
     detect_provider as find_provider, provider_presets, ProviderPreset,
@@ -41,11 +41,13 @@ pub fn list_accounts(
 }
 
 #[tauri::command]
-pub fn create_account(
+pub async fn create_account(
     state: State<'_, AppState>,
     input: CreateAccountInput,
 ) -> Result<crate::domain::Account, AppErrorDto> {
-    account_service::create_account(&state, input).map_err(Into::into)
+    account_service::create_account(&state, input)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -112,61 +114,64 @@ pub async fn test_outgoing_connection(
 
 #[tauri::command]
 pub fn remove_account(state: State<'_, AppState>, account_id: String) -> Result<(), AppErrorDto> {
-    state.sync.cancel(&account_id);
-    let refs = state
-        .database
-        .lock()
-        .map_err(|_| {
+    remove_account_from_state(&state, &account_id)
+}
+
+fn remove_account_from_state(state: &AppState, account_id: &str) -> Result<(), AppErrorDto> {
+    state.sync.cancel(account_id);
+    let refs = {
+        let mut database = state.database.lock().map_err(|_| {
             AppErrorDto::from(crate::errors::AppError::Internal(
                 "database lock poisoned".into(),
             ))
-        })?
-        .account_secret_refs(&account_id)
-        .map_err(AppErrorDto::from)?;
-    let mut secret_delete_error = None;
-    for reference in [refs.0, refs.1].into_iter().flatten() {
+        })?;
+        let refs = database
+            .account_secret_refs(account_id)
+            .map_err(AppErrorDto::from)?;
+        database
+            .delete_account(account_id)
+            .map_err(AppErrorDto::from)?;
+        refs
+    };
+    let mut references = [refs.0, refs.1].into_iter().flatten().collect::<Vec<_>>();
+    references.sort_unstable();
+    references.dedup();
+    for reference in references {
         if let Err(error) = state.secret_store.delete(&reference) {
-            secret_delete_error = Some(error.to_string());
+            tracing::warn!(
+                account_id,
+                error = %error,
+                "account was removed but an orphaned credential could not be deleted"
+            );
         }
     }
-    if let Some(error) = secret_delete_error {
-        return Err(AppErrorDto::from(crate::errors::AppError::SecretStore(
-            format!("无法删除账户凭据：{error}"),
-        )));
-    }
-    state
-        .database
-        .lock()
-        .map_err(|_| {
-            AppErrorDto::from(crate::errors::AppError::Internal(
-                "database lock poisoned".into(),
-            ))
-        })?
-        .delete_account(&account_id)
-        .map_err(Into::into)
+    Ok(())
 }
 
 #[tauri::command]
 pub fn list_mailboxes(
     state: State<'_, AppState>,
-    account_id: String,
+    account_id: Option<String>,
 ) -> Result<Vec<crate::domain::Mailbox>, AppErrorDto> {
-    state
-        .database
-        .lock()
-        .map_err(|_| {
-            AppErrorDto::from(crate::errors::AppError::Internal(
-                "database lock poisoned".into(),
-            ))
-        })?
-        .list_mailboxes(&account_id)
-        .map_err(Into::into)
+    let database = state.database.lock().map_err(|_| {
+        AppErrorDto::from(crate::errors::AppError::Internal(
+            "database lock poisoned".into(),
+        ))
+    })?;
+    match account_id {
+        Some(account_id) => database.list_mailboxes(&account_id),
+        None => database.list_all_mailboxes(),
+    }
+    .map_err(Into::into)
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListMessagesInput {
+    pub account_id: Option<String>,
     pub mailbox_id: Option<String>,
+    pub mailbox_role: Option<String>,
+    pub is_starred: Option<bool>,
     pub search: Option<String>,
     pub limit: Option<u32>,
 }
@@ -177,13 +182,22 @@ pub fn list_messages(
     input: Option<ListMessagesInput>,
 ) -> Result<Vec<Message>, AppErrorDto> {
     let input = input.unwrap_or(ListMessagesInput {
+        account_id: None,
         mailbox_id: None,
+        mailbox_role: None,
+        is_starred: None,
         search: None,
         limit: None,
     });
-    let messages =
-        message_service::list_messages(&state, input.mailbox_id, input.limit.unwrap_or(100))
-            .map_err(AppErrorDto::from)?;
+    let messages = message_service::list_messages_in_scope(
+        &state,
+        input.account_id,
+        input.mailbox_id,
+        input.mailbox_role,
+        input.is_starred,
+        input.limit.unwrap_or(100),
+    )
+    .map_err(AppErrorDto::from)?;
     if let Some(query) = input.search.filter(|query| !query.trim().is_empty()) {
         let query = query.to_lowercase();
         Ok(messages
@@ -208,7 +222,10 @@ pub fn search_messages(
     input: Option<ListMessagesInput>,
 ) -> Result<Vec<Message>, AppErrorDto> {
     let input = input.unwrap_or(ListMessagesInput {
+        account_id: None,
         mailbox_id: None,
+        mailbox_role: None,
+        is_starred: None,
         search: Some(String::new()),
         limit: None,
     });
@@ -221,8 +238,11 @@ pub fn search_messages(
                 "database lock poisoned".into(),
             ))
         })?
-        .search_messages(
+        .search_messages_in_scope(
+            input.account_id.as_deref(),
             input.mailbox_id.as_deref(),
+            input.mailbox_role.as_deref(),
+            input.is_starred,
             &query,
             input.limit.unwrap_or(100).min(500),
         )
@@ -235,11 +255,22 @@ pub fn get_message(state: State<'_, AppState>, message_id: String) -> Result<Mes
 }
 
 #[tauri::command]
-pub fn fetch_message_body(
+pub async fn fetch_message_body(
     state: State<'_, AppState>,
     message_id: String,
+    mailbox_id: String,
 ) -> Result<Message, AppErrorDto> {
-    get_message(state, message_id)
+    fetch_message_body_from_state(&state, message_id, mailbox_id).await
+}
+
+async fn fetch_message_body_from_state(
+    state: &AppState,
+    message_id: String,
+    mailbox_id: String,
+) -> Result<Message, AppErrorDto> {
+    message_service::fetch_message_body(state, message_id, mailbox_id)
+        .await
+        .map_err(Into::into)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -249,32 +280,50 @@ pub struct MessageMutation {
     pub is_starred: Option<bool>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageInstanceRefInput {
+    pub message_id: String,
+    pub mailbox_id: String,
+}
+
 #[tauri::command]
 pub fn mutate_message(
     state: State<'_, AppState>,
     message_id: String,
+    mailbox_id: String,
     mutation: MessageMutation,
 ) -> Result<Message, AppErrorDto> {
-    message_service::mutate_message(&state, message_id, mutation.is_read, mutation.is_starred)
-        .map_err(Into::into)
+    message_service::mutate_message(
+        &state,
+        message_id,
+        mailbox_id,
+        mutation.is_read,
+        mutation.is_starred,
+    )
+    .map_err(Into::into)
 }
 
 #[tauri::command]
 pub fn mark_read(
     state: State<'_, AppState>,
     message_id: String,
+    mailbox_id: String,
     is_read: bool,
 ) -> Result<Message, AppErrorDto> {
-    message_service::mutate_message(&state, message_id, Some(is_read), None).map_err(Into::into)
+    message_service::mutate_message(&state, message_id, mailbox_id, Some(is_read), None)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
 pub fn set_starred(
     state: State<'_, AppState>,
     message_id: String,
+    mailbox_id: String,
     is_starred: bool,
 ) -> Result<Message, AppErrorDto> {
-    message_service::mutate_message(&state, message_id, None, Some(is_starred)).map_err(Into::into)
+    message_service::mutate_message(&state, message_id, mailbox_id, None, Some(is_starred))
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -316,7 +365,16 @@ pub fn start_sync(
 #[tauri::command]
 pub fn cancel_sync(state: State<'_, AppState>, account_id: String) -> Result<(), AppErrorDto> {
     state.sync.cancel(&account_id);
-    Ok(())
+    state
+        .database
+        .lock()
+        .map_err(|_| {
+            AppErrorDto::from(crate::errors::AppError::Internal(
+                "database lock poisoned".into(),
+            ))
+        })?
+        .mark_account_sync_cancelled(&account_id)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -350,12 +408,33 @@ pub fn sync_all(
         })?
         .list_accounts()
         .map_err(AppErrorDto::from)?;
-    accounts
+    let statuses = accounts
         .into_iter()
+        .filter(is_sync_candidate)
         .map(|account| {
-            sync_service::start_sync(&state, app.clone(), account.id).map_err(Into::into)
+            let account_id = account.id;
+            match sync_service::start_sync(&state, app.clone(), account_id.clone()) {
+                Ok(status) => status,
+                Err(error) => state
+                    .sync
+                    .status(&account_id)
+                    .unwrap_or_else(|| SyncStatus {
+                        account_id: account_id.clone(),
+                        state: "error".into(),
+                        phase: Some("folders".into()),
+                        processed: None,
+                        total: None,
+                        message: Some(error.to_string()),
+                        retryable: error.retryable(),
+                    }),
+            }
         })
-        .collect()
+        .collect();
+    Ok(statuses)
+}
+
+fn is_sync_candidate(account: &Account) -> bool {
+    account.enabled && account.incoming_configured && account.sync_policy != "paused"
 }
 
 #[tauri::command]
@@ -411,7 +490,7 @@ pub fn refresh_mailboxes(
     state: State<'_, AppState>,
     account_id: String,
 ) -> Result<Vec<crate::domain::Mailbox>, AppErrorDto> {
-    list_mailboxes(state, account_id)
+    list_mailboxes(state, Some(account_id))
 }
 
 #[tauri::command]
@@ -436,10 +515,14 @@ pub fn set_mailbox_sync_policy(
 #[tauri::command]
 pub fn move_messages(
     state: State<'_, AppState>,
-    message_ids: Vec<String>,
+    messages: Vec<MessageInstanceRefInput>,
     mailbox_id: String,
 ) -> Result<serde_json::Value, AppErrorDto> {
-    let count = message_service::move_messages(&state, message_ids, mailbox_id)
+    let message_refs = messages
+        .into_iter()
+        .map(|message| (message.message_id, message.mailbox_id))
+        .collect();
+    let count = message_service::move_messages(&state, message_refs, mailbox_id)
         .map_err(AppErrorDto::from)?;
     Ok(serde_json::json!({ "moved": count }))
 }
@@ -447,10 +530,14 @@ pub fn move_messages(
 #[tauri::command]
 pub fn delete_messages(
     state: State<'_, AppState>,
-    message_ids: Vec<String>,
+    messages: Vec<MessageInstanceRefInput>,
     permanent: bool,
 ) -> Result<serde_json::Value, AppErrorDto> {
-    let count = message_service::delete_messages(&state, message_ids, permanent)
+    let message_refs = messages
+        .into_iter()
+        .map(|message| (message.message_id, message.mailbox_id))
+        .collect();
+    let count = message_service::delete_messages(&state, message_refs, permanent)
         .map_err(AppErrorDto::from)?;
     Ok(serde_json::json!({ "deleted": count }))
 }
@@ -690,4 +777,117 @@ fn map_outgoing_error(error: crate::backends::outgoing::OutgoingError) -> AppErr
         OutgoingError::Rejected(message) => crate::errors::AppError::ServerRejected(message),
     };
     AppErrorDto::from(app_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::{fetch_message_body_from_state, is_sync_candidate, remove_account_from_state};
+    use crate::app_state::{AppState, SyncCoordinator};
+    use crate::auth::secret_store::{SecretStore, SecretStoreError};
+    use crate::domain::account::CreateAccountInput;
+    use crate::domain::Account;
+    use crate::providers::registry::provider_presets;
+    use crate::storage::database::Database;
+
+    struct FailingDeleteSecretStore;
+
+    impl SecretStore for FailingDeleteSecretStore {
+        fn set(&self, _reference: &str, _secret: &str) -> Result<(), SecretStoreError> {
+            Ok(())
+        }
+
+        fn get(&self, _reference: &str) -> Result<String, SecretStoreError> {
+            Err(SecretStoreError::NotFound)
+        }
+
+        fn delete(&self, _reference: &str) -> Result<(), SecretStoreError> {
+            Err(SecretStoreError::OperationFailed)
+        }
+    }
+
+    fn account(enabled: bool, incoming_configured: bool, sync_policy: &str) -> Account {
+        Account {
+            id: "account".into(),
+            provider_id: "qq".into(),
+            email: "test@qq.com".into(),
+            display_name: "Test".into(),
+            enabled,
+            sync_policy: sync_policy.into(),
+            incoming_configured,
+            outgoing_configured: true,
+            sync_status: "idle".into(),
+            last_synced_at: None,
+        }
+    }
+
+    #[test]
+    fn sync_all_only_targets_enabled_incoming_accounts_that_are_not_paused() {
+        assert!(is_sync_candidate(&account(true, true, "automatic")));
+        assert!(is_sync_candidate(&account(true, true, "manual")));
+        assert!(!is_sync_candidate(&account(false, true, "automatic")));
+        assert!(!is_sync_candidate(&account(true, false, "automatic")));
+        assert!(!is_sync_candidate(&account(true, true, "paused")));
+    }
+
+    #[tokio::test]
+    async fn fetch_body_command_delegates_to_async_service_and_preserves_error_code() {
+        let state = AppState {
+            database: Mutex::new(Database::open_in_memory().expect("database")),
+            secret_store: Arc::new(FailingDeleteSecretStore),
+            sync: Arc::new(SyncCoordinator::new()),
+        };
+        let error = fetch_message_body_from_state(
+            &state,
+            "missing-message".into(),
+            "missing-mailbox".into(),
+        )
+        .await
+        .expect_err("missing message must fail");
+        assert_eq!(error.code, "not_found");
+    }
+
+    #[test]
+    fn removing_account_keeps_database_consistent_when_secret_cleanup_fails() {
+        let mut database = Database::open_in_memory().expect("database");
+        let preset = provider_presets()
+            .into_iter()
+            .find(|preset| preset.id == "qq")
+            .expect("QQ preset");
+        let account = database
+            .create_account(
+                &CreateAccountInput {
+                    email: "remove@qq.com".into(),
+                    display_name: "Remove".into(),
+                    provider_id: "qq".into(),
+                    secret: "not persisted".into(),
+                    incoming_secret: None,
+                    outgoing_secret: None,
+                    incoming: None,
+                    outgoing: None,
+                },
+                &preset,
+                "account/remove/incoming",
+                "account/remove/outgoing",
+                true,
+                true,
+            )
+            .expect("account");
+        let state = AppState {
+            database: Mutex::new(database),
+            secret_store: Arc::new(FailingDeleteSecretStore),
+            sync: Arc::new(SyncCoordinator::new()),
+        };
+
+        remove_account_from_state(&state, &account.id)
+            .expect("credential cleanup must not resurrect the account");
+        assert!(state
+            .database
+            .lock()
+            .expect("database lock")
+            .list_accounts()
+            .expect("accounts")
+            .is_empty());
+    }
 }

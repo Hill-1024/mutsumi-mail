@@ -62,7 +62,7 @@ export interface Mailbox {
   remoteId: string;
   name: string;
   displayName: string;
-  specialRole?: 'inbox' | 'sent' | 'drafts' | 'trash' | 'junk' | 'archive';
+  specialRole?: 'inbox' | 'sent' | 'drafts' | 'trash' | 'junk' | 'archive' | 'all' | 'starred';
   unreadCount: number;
   totalCount: number;
   syncEnabled: boolean;
@@ -98,7 +98,7 @@ export interface Message {
 export interface SyncStatus {
   accountId: string;
   state: 'idle' | 'syncing' | 'partial' | 'offline' | 'error';
-  phase?: 'folders' | 'metadata' | 'body' | 'outbox';
+  phase?: 'authentication' | 'folders' | 'messages' | 'metadata' | 'body' | 'outbox';
   processed?: number;
   total?: number;
   message?: string;
@@ -123,6 +123,10 @@ export interface OutboxItem {
   subject: string;
   recipients: string[];
   state: 'queued' | 'sending' | 'sent' | 'failed' | 'outcome_unknown' | 'cancelled';
+  lastErrorCode?: string;
+  lastErrorMessage?: string;
+  sentCopyState?: 'not_started' | 'awaiting_server_sync' | 'confirmed' | 'unavailable' | 'failed';
+  sentCopyErrorMessage?: string;
   updatedAt: string;
 }
 

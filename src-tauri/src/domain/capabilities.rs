@@ -22,31 +22,3 @@ pub struct ProviderCapabilities {
     pub oauth2: bool,
     pub multiple_identities: bool,
 }
-
-impl ProviderCapabilities {
-    pub fn enabled_count(&self) -> usize {
-        [
-            self.folders,
-            self.labels,
-            self.idle_push,
-            self.server_search,
-            self.r#move,
-            self.copy,
-            self.append,
-            self.append_sent,
-            self.drafts,
-            self.trash,
-            self.archive,
-            self.flags,
-            self.keywords,
-            self.threading,
-            self.partial_fetch,
-            self.smtp_utf8,
-            self.oauth2,
-            self.multiple_identities,
-        ]
-        .into_iter()
-        .filter(|enabled| *enabled)
-        .count()
-    }
-}
