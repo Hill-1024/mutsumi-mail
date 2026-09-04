@@ -298,7 +298,7 @@ jobs:
           keystore_path="$RUNNER_TEMP/mutsumi-mail-release.jks"
           printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
           test -s "$keystore_path"
-          actual_fingerprint="$(keytool -list -v -keystore "$keystore_path" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" | awk -F ': ' '/SHA256:/{ print $2; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+          actual_fingerprint="$(keytool -list -v -keystore "$keystore_path" -storepass "$ANDROID_KEYSTORE_PASSWORD" -alias "$ANDROID_KEY_ALIAS" | awk -F ': ' '/SHA256:/{ print $NF; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           expected_fingerprint="$(printf '%s' "$ANDROID_CERTIFICATE_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           test "$actual_fingerprint" = "$expected_fingerprint" || { echo "Android signing certificate fingerprint does not match the pinned value." >&2; exit 1; }
 
@@ -344,8 +344,8 @@ jobs:
           "$apksigner" verify --verbose --print-certs "$apk_path"
           jarsigner -verify -certs "$aab_path"
           expected_fingerprint="$(printf '%s' "$ANDROID_CERTIFICATE_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
-          apk_fingerprint="$("$apksigner" verify --print-certs "$apk_path" | awk -F ': ' '/SHA-256 digest:/{ print $2; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
-          aab_fingerprint="$(keytool -printcert -jarfile "$aab_path" | awk -F ': ' '/SHA256:/{ print $2; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+          apk_fingerprint="$("$apksigner" verify --print-certs "$apk_path" | awk -F ': ' '/SHA-256 digest:/{ print $NF; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
+          aab_fingerprint="$(keytool -printcert -jarfile "$aab_path" | awk -F ': ' '/SHA256:/{ print $NF; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           test "$apk_fingerprint" = "$expected_fingerprint"
           test "$aab_fingerprint" = "$expected_fingerprint"
       - uses: actions/upload-artifact@v4
