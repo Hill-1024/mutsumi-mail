@@ -130,7 +130,7 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@1.94.0
       - run: pnpm install --frozen-lockfile
-      - name: Import and pin the Windows code-signing certificate
+      - name: Restore and pin the Windows code-signing certificate
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -142,27 +142,35 @@ jobs:
 
           $certificatePath = Join-Path $env:RUNNER_TEMP "mutsumi-mail-distribution.pfx"
           [System.IO.File]::WriteAllBytes($certificatePath, [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
-          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
-          $imported = @(Import-PfxCertificate -FilePath $certificatePath -CertStoreLocation Cert:\CurrentUser\My -Password $password)
-          $signingCertificates = @($imported | Where-Object { $_.HasPrivateKey })
-          if ($signingCertificates.Count -ne 1) {
-            throw "The PFX must import exactly one code-signing identity."
+          $keyFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
+          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            $certificatePath,
+            $env:WINDOWS_CERTIFICATE_PASSWORD,
+            $keyFlags
+          )
+          if (-not $certificate.HasPrivateKey) {
+            throw "The PFX does not contain a code-signing private key."
           }
 
-          $actualFingerprint = ($signingCertificates[0].Thumbprint -replace '\s', '').ToUpperInvariant()
+          $actualFingerprint = ($certificate.Thumbprint -replace '\s', '').ToUpperInvariant()
           $expectedFingerprint = ($env:WINDOWS_CERTIFICATE_SHA1 -replace '[:\s]', '').ToUpperInvariant()
           if ($actualFingerprint -ne $expectedFingerprint) {
             throw "Windows signing certificate fingerprint does not match the pinned value."
           }
 
-          $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new("Root", "CurrentUser")
-          $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
-          $rootStore.Add($signingCertificates[0])
-          $rootStore.Close()
-
-          "WINDOWS_CERTIFICATE_THUMBPRINT=$actualFingerprint" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $configPath = Join-Path $env:RUNNER_TEMP "tauri.windows.signing.json"
-          @{ bundle = @{ windows = @{ certificateThumbprint = $actualFingerprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" } } } |
+          $signCommand = @{
+            cmd = "signtool.exe"
+            args = @(
+              "sign", "/f", $certificatePath,
+              "/p", $env:WINDOWS_CERTIFICATE_PASSWORD,
+              "/fd", "SHA256",
+              "/tr", "http://timestamp.digicert.com",
+              "/td", "SHA256",
+              "%1"
+            )
+          }
+          @{ bundle = @{ windows = @{ signCommand = $signCommand } } } |
             ConvertTo-Json -Depth 5 |
             Set-Content -Path $configPath -Encoding utf8
           "TAURI_WINDOWS_SIGNING_CONFIG=$configPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -182,8 +190,11 @@ jobs:
           }
           foreach ($package in $packages) {
             $signature = Get-AuthenticodeSignature -FilePath $package.FullName
-            if ($signature.Status -ne "Valid") {
+            if ($signature.Status -in @("NotSigned", "HashMismatch")) {
               throw "Invalid Authenticode signature for $($package.FullName): $($signature.Status)"
+            }
+            if ($null -eq $signature.SignerCertificate) {
+              throw "No Authenticode signer certificate found for $($package.FullName)"
             }
             $actualFingerprint = ($signature.SignerCertificate.Thumbprint -replace '\s', '').ToUpperInvariant()
             if ($actualFingerprint -ne $expectedFingerprint) {
@@ -203,10 +214,6 @@ jobs:
         shell: pwsh
         run: |
           Remove-Item -Force -ErrorAction SilentlyContinue "$env:RUNNER_TEMP/mutsumi-mail-distribution.pfx", "$env:RUNNER_TEMP/tauri.windows.signing.json"
-          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_THUMBPRINT)) {
-            Remove-Item -Force -ErrorAction SilentlyContinue "Cert:\CurrentUser\My\$env:WINDOWS_CERTIFICATE_THUMBPRINT"
-            Remove-Item -Force -ErrorAction SilentlyContinue "Cert:\CurrentUser\Root\$env:WINDOWS_CERTIFICATE_THUMBPRINT"
-          }
 
   android:
     name: Build signed Android distribution
