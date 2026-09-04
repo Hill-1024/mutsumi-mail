@@ -158,9 +158,18 @@ jobs:
             throw "Windows signing certificate fingerprint does not match the pinned value."
           }
 
+          $windowsSdkBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+          $signTool = Get-ChildItem -Path $windowsSdkBin -Filter "signtool.exe" -Recurse -File |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+            Sort-Object -Property FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $signTool) {
+            throw "Unable to locate the x64 Windows SDK signtool.exe."
+          }
+
           $configPath = Join-Path $env:RUNNER_TEMP "tauri.windows.signing.json"
           $signCommand = @{
-            cmd = "signtool.exe"
+            cmd = $signTool.FullName
             args = @(
               "sign", "/f", $certificatePath,
               "/p", $env:WINDOWS_CERTIFICATE_PASSWORD,
