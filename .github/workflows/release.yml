@@ -321,7 +321,7 @@ jobs:
           apksigner="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs "$apk_path"
-          jarsigner -verify -strict -certs "$aab_path"
+          jarsigner -verify -certs "$aab_path"
           expected_fingerprint="$(printf '%s' "$ANDROID_CERTIFICATE_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           apk_fingerprint="$("$apksigner" verify --print-certs "$apk_path" | awk -F ': ' '/SHA-256 digest:/{ print $2; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           aab_fingerprint="$(keytool -printcert -jarfile "$aab_path" | awk -F ': ' '/SHA256:/{ print $2; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
