@@ -311,6 +311,27 @@ jobs:
           } > src-tauri/gen/android/keystore.properties
       - name: Build signed universal APK and AAB
         run: pnpm tauri android build --ci --apk --aab --target aarch64 --target armv7
+      - name: Re-sign the final Android App Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          aab_path="$(find src-tauri/gen/android/app/build/outputs/bundle -type f -name '*.aab' -print -quit)"
+          test -n "$aab_path"
+          command -v zip >/dev/null
+          mapfile -t old_signatures < <(
+            unzip -Z1 "$aab_path" |
+              grep -E '^META-INF/[^/]+\.(SF|RSA|DSA)$|^META-INF/MANIFEST\.MF$'
+          )
+          test "${#old_signatures[@]}" -gt 0
+          zip -d "$aab_path" "${old_signatures[@]}"
+          jarsigner \
+            -keystore "$RUNNER_TEMP/mutsumi-mail-release.jks" \
+            -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+            -keypass "$ANDROID_KEY_PASSWORD" \
+            -sigalg SHA256withRSA \
+            -digestalg SHA-256 \
+            "$aab_path" \
+            "$ANDROID_KEY_ALIAS"
       - name: Verify Android package signatures
         shell: bash
         run: |
@@ -321,7 +342,7 @@ jobs:
           apksigner="$(find "$ANDROID_SDK_ROOT/build-tools" -type f -name apksigner -print | sort -V | tail -n 1)"
           test -x "$apksigner"
           "$apksigner" verify --verbose --print-certs "$apk_path"
-          jarsigner -verify -certs "$aab_path"
+          jarsigner -verify -strict -certs "$aab_path"
           expected_fingerprint="$(printf '%s' "$ANDROID_CERTIFICATE_SHA256" | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           apk_fingerprint="$("$apksigner" verify --print-certs "$apk_path" | awk -F ': ' '/SHA-256 digest:/{ print $2; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           aab_fingerprint="$(keytool -printcert -jarfile "$aab_path" | awk -F ': ' '/SHA256:/{ print $2; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
