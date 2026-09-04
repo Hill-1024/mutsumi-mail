@@ -151,15 +151,12 @@ fn start_sync_with_loaded_session(
             .lock()
             .ok()
             .and_then(|database| {
-                database
-                    .list_accounts()
-                    .ok()
-                    .and_then(|accounts| {
-                        accounts
-                            .into_iter()
-                            .find(|account| account.id == account_id)
-                            .and_then(|account| account.last_synced_at)
-                    })
+                database.list_accounts().ok().and_then(|accounts| {
+                    accounts
+                        .into_iter()
+                        .find(|account| account.id == account_id)
+                        .and_then(|account| account.last_synced_at)
+                })
             })
             .is_some()
     } else {
@@ -213,7 +210,10 @@ fn start_sync_with_loaded_session(
                         Ok(mut database) => {
                             match database.mark_account_sync_completed(&completed_account) {
                                 Ok(()) => {
-                                    if should_notify_new_mail && had_completed_sync && report.inserted > 0 {
+                                    if should_notify_new_mail
+                                        && had_completed_sync
+                                        && report.inserted > 0
+                                    {
                                         notify_new_mail(&notification_app, report.inserted);
                                     }
                                     successful_sync_status(completed_account, report)
