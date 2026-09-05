@@ -1,7 +1,7 @@
 # 安全模型
 
 - 默认只允许 IMAPS/SMTPS/STARTTLS；不接受所有证书，不自动降级明文认证。
-- React 仅在账户表单提交期间持有输入的凭据，不写入浏览器持久存储；Rust 通过 `SecretStore` 抽象访问系统安全存储。
+- React 仅在账户表单提交期间持有输入的凭据，不写入浏览器持久存储；Rust 通过 `SecretStore` 抽象访问应用本地凭据文件。
 - 邮件正文默认视为不可信。HTML 正文先经过严格标签、属性、URL 与内联样式白名单清洗再渲染；脚本、表单、嵌入对象和事件属性会被移除，默认阻止远程图片，并由 CSP 限制可加载内容。
 - 日志使用结构化字段，禁止 Authorization header、secret、完整正文和完整收件人列表。
 - 本地邮件缓存第一版不宣称静态加密；凭据保护与邮件缓存保护是两个独立问题。
@@ -10,17 +10,11 @@
 
 ## 统一凭据存储
 
-业务代码只依赖一个 `SecretStore` 接口，不按平台散落读写逻辑，也不提供明文 SQLite 或配置文件兜底。各平台实现如下：
+业务代码依赖 `SecretStore` 接口，默认实现为 `LocalSecretStore`。授权码以明文保存到应用数据目录的 `credentials/credentials.sqlite3`，不放入项目目录、浏览器 localStorage、诊断导出或日志。
 
-| 平台 | 原生存储 |
-| --- | --- |
-| macOS | Apple Keychain |
-| iOS | Apple Protected Data credential store |
-| Android | Android Keystore 保护的加密 SharedPreferences |
-| Windows | Windows Credential Manager |
-| Linux | Secret Service（例如 GNOME Keyring、KWallet 的兼容服务） |
+Unix 平台目录权限为 `0700`、文件权限为 `0600`；Windows 使用当前用户应用数据目录的继承权限，移动端使用应用沙箱。SQLite 事务保证写入原子性，删除使用 secure_delete 并保留空值标记，防止旧钥匙串项目重新导入。不宣称本地静态加密。
 
-应用只在添加或更新账号、连接测试、自动同步首次建立会话、发送邮件，以及未缓存正文/附件需要按需下载时读取相应凭据。成功读取和读取失败均在当前进程缓存；同一进程内不会为每个同步阶段重复访问系统存储。安全存储或认证失败会终止该账户的后台实时任务，失败的存储读取在当前进程不重试；成功写入新凭据或重启后才清除失败缓存，避免形成授权弹窗循环。
+macOS 仅在本地缺少条目时尝试一次静默读取旧钥匙串，读取成功即写入本地。迁移禁止系统交互；读取失败不循环弹窗。其他平台不访问旧系统凭据存储，可在“设置 → 邮箱账户 → 更新授权码”恢复。更新会保留账户及邮件缓存，切换凭据引用后重启同步。
 
 ## macOS 本机签名与钥匙串
 

@@ -375,3 +375,7 @@ function providerFor(email: string): ProviderPreset | null {
     ) ?? null
   );
 }
+
+export async function updateAccountCredentials(accountId: string, secret: string, outgoingSecret?: string): Promise<void> {
+  return call<void>('update_account_credentials', { accountId, secret, outgoingSecret });
+}

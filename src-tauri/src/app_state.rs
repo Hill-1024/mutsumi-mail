@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::auth::secret_store::{PlatformSecretStore, SecretStore};
+use crate::auth::secret_store::{LocalSecretStore, SecretStore};
 use crate::domain::SyncStatus;
 use crate::errors::AppError;
 use crate::storage::database::Database;
@@ -229,7 +229,10 @@ impl AppState {
     pub fn open(path: &Path) -> Result<Self, AppError> {
         Ok(Self {
             database: Mutex::new(Database::open(path)?),
-            secret_store: Arc::new(PlatformSecretStore::new()),
+            secret_store: Arc::new(
+                LocalSecretStore::open(&path.with_file_name("credentials"))
+                    .map_err(|error| AppError::SecretStore(error.to_string()))?,
+            ),
             sync: Arc::new(SyncCoordinator::new()),
             realtime: Arc::new(RealtimeSyncCoordinator::new()),
         })

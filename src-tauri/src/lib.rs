@@ -92,6 +92,7 @@ pub fn run() {
             commands::update_account,
             commands::get_account_status,
             commands::reconnect_account,
+            commands::update_account_credentials,
             commands::refresh_mailboxes,
             commands::set_mailbox_sync_policy,
             commands::move_messages,

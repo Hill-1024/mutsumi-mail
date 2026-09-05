@@ -165,6 +165,68 @@ impl AccountConnectionTester for LiveConnectionTester {
     }
 }
 
+pub fn update_credentials(
+    state: &AppState,
+    account_id: &str,
+    secret: &str,
+    outgoing_secret: Option<&str>,
+) -> Result<(), AppError> {
+    if secret.trim().is_empty() {
+        return Err(AppError::InvalidConfiguration("请输入授权码".into()));
+    }
+    let outgoing_secret = outgoing_secret
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(secret);
+    let mut database = state
+        .database
+        .lock()
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+    let (old_incoming, old_outgoing) = database.account_secret_refs(account_id)?;
+    let generation = uuid::Uuid::new_v4();
+    let incoming = old_incoming
+        .as_ref()
+        .map(|_| format!("account/{generation}/incoming"));
+    let outgoing = old_outgoing
+        .as_ref()
+        .map(|_| format!("account/{generation}/outgoing"));
+    if incoming.is_none() && outgoing.is_none() {
+        return Err(AppError::InvalidConfiguration(
+            "账户未配置收件或发件服务".into(),
+        ));
+    }
+    let write = || -> Result<(), AppError> {
+        if let Some(reference) = &incoming {
+            state
+                .secret_store
+                .set(reference, secret)
+                .map_err(|e| AppError::SecretStore(e.to_string()))?;
+        }
+        if let Some(reference) = &outgoing {
+            state
+                .secret_store
+                .set(reference, outgoing_secret)
+                .map_err(|e| AppError::SecretStore(e.to_string()))?;
+        }
+        Ok(())
+    };
+    let result = write().and_then(|_| {
+        database.replace_account_secret_refs(account_id, incoming.as_deref(), outgoing.as_deref())
+    });
+    if let Err(error) = result {
+        for reference in incoming.iter().chain(outgoing.iter()) {
+            let _ = state.secret_store.delete(reference);
+        }
+        return Err(error);
+    }
+    drop(database);
+    for reference in old_incoming.iter().chain(old_outgoing.iter()) {
+        let _ = state.secret_store.delete(reference);
+    }
+    state.sync.cancel(account_id);
+    state.realtime.restart_account(account_id);
+    Ok(())
+}
+
 pub async fn create_account(
     state: &AppState,
     input: CreateAccountInput,
@@ -753,5 +815,57 @@ mod tests {
             .account_secret_refs(&account.id)
             .expect("secret refs");
         assert_ne!(incoming_ref, outgoing_ref);
+    }
+    #[tokio::test]
+    async fn replacing_credentials_preserves_account_and_supports_distinct_endpoints() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(MemorySecretStore::with_events(events.clone()));
+        let state = state_with_store(store.clone());
+        let tester = StubConnectionTester {
+            events,
+            fail_incoming: false,
+            fail_outgoing: false,
+        };
+        let account = create_account_with_tester(&state, qq_input(), &tester)
+            .await
+            .unwrap();
+        let old = state
+            .database
+            .lock()
+            .unwrap()
+            .account_secret_refs(&account.id)
+            .unwrap();
+        super::update_credentials(&state, &account.id, "new-incoming", Some("new-outgoing"))
+            .unwrap();
+        let refs = state
+            .database
+            .lock()
+            .unwrap()
+            .account_secret_refs(&account.id)
+            .unwrap();
+        assert_ne!(old, refs);
+        assert_eq!(
+            store.get(refs.0.as_deref().unwrap()).unwrap(),
+            "new-incoming"
+        );
+        assert_eq!(
+            store.get(refs.1.as_deref().unwrap()).unwrap(),
+            "new-outgoing"
+        );
+        assert!(store.get(old.0.as_deref().unwrap()).is_err());
+        assert_eq!(
+            state.database.lock().unwrap().list_accounts().unwrap()[0].id,
+            account.id
+        );
+        assert!(super::update_credentials(&state, &account.id, "  ", None).is_err());
+        assert_eq!(
+            state
+                .database
+                .lock()
+                .unwrap()
+                .account_secret_refs(&account.id)
+                .unwrap(),
+            refs
+        );
     }
 }

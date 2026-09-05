@@ -78,7 +78,7 @@ impl From<AppError> for AppErrorDto {
         let code = error.code().to_string();
         let message = match &error {
             AppError::Authentication => "认证失败，请检查客户端授权码或重新授权".into(),
-            AppError::SecretStore(_) => "系统安全存储不可用，请检查钥匙串/凭据管理器权限".into(),
+            AppError::SecretStore(message) => message.clone(),
             AppError::Network(_) => "网络连接失败，请检查网络和服务器设置后重试".into(),
             AppError::AmbiguousSend => "服务器可能已经接收邮件，是否重试需要你确认".into(),
             _ => error.to_string(),

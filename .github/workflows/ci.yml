@@ -3,6 +3,14 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   frontend:
@@ -22,7 +30,20 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
+  rust-format:
+    name: Rust formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt
+      - name: Check Rust formatting
+        run: cargo fmt --check
+        working-directory: src-tauri
+
   rust:
+    needs: rust-format
     strategy:
       fail-fast: false
       matrix:
@@ -46,14 +67,14 @@ jobs:
             libxdo-dev \
             pkg-config \
             wget
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
+          components: clippy
+      - name: Check Rust warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
         working-directory: src-tauri
-      - run: cargo clippy --all-targets -- -D warnings
-        working-directory: src-tauri
-      - run: cargo test
+      - name: Run Rust tests
+        run: cargo test --locked --all-targets --all-features
         working-directory: src-tauri
 
   tauri-build-verification:
@@ -84,6 +105,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo check
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - run: cargo check --locked
         working-directory: src-tauri

@@ -12,6 +12,8 @@ import {
   retryOutboxItem,
   searchMessages,
   updateSettings,
+  updateAccountCredentials,
+  startSync,
 } from '../lib/tauri';
 import { getAndroidDynamicColor, THEME_PALETTES } from '../lib/theme';
 import { filterMessages, parseSearch } from '../lib/mail-utils';
@@ -333,6 +335,12 @@ export function SettingsView({
     setSafeReading,
     setNavPage,
   } = useUiStore();
+  const [credentialAccount, setCredentialAccount] = useState<Account | null>(null);
+  const [credentialSecret, setCredentialSecret] = useState('');
+  const [outgoingSecret, setOutgoingSecret] = useState('');
+  const [savingCredentials, setSavingCredentials] = useState(false);
+  const [credentialFeedback, setCredentialFeedback] = useState('');
+  const queryClient = useQueryClient();
   const [cacheStatus, setCacheStatus] = useState('');
   const [syncPolicy, setSyncPolicy] = useState('automatic');
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
@@ -517,6 +525,7 @@ export function SettingsView({
                           : '仅发件'}
                     </span>
                   </div>
+                  <button className="text-action" type="button" onClick={() => { setCredentialAccount(account); setCredentialSecret(''); setOutgoingSecret(''); setCredentialFeedback(''); }}>更新授权码</button>
                   {confirmRemoveId === account.id ? (
                     <div
                       className="settings-account-confirm"
@@ -559,6 +568,31 @@ export function SettingsView({
               ))}
             </div>
           )}
+          {credentialAccount && (
+            <form className="credential-form" onSubmit={(event) => {
+              event.preventDefault();
+              if (savingCredentials) return;
+              setSavingCredentials(true); setCredentialFeedback('');
+              void updateAccountCredentials(credentialAccount.id, credentialSecret, outgoingSecret || undefined)
+                .then(async () => {
+                  setCredentialSecret(''); setOutgoingSecret(''); setCredentialAccount(null);
+                  setCredentialFeedback('授权码已保存在本地。');
+                  if (credentialAccount.incomingConfigured && credentialAccount.enabled) {
+                    try { await startSync(credentialAccount.id); } catch (error) { setCredentialFeedback(`授权码已保存；${appErrorMessage(error)}`); }
+                  }
+                  await queryClient.invalidateQueries({ queryKey: ['accounts'] });
+                })
+                .catch((error) => setCredentialFeedback(appErrorMessage(error)))
+                .finally(() => setSavingCredentials(false));
+            }}>
+              <h3>更新 {credentialAccount.email} 的授权码</h3>
+              <p>保存在本机应用目录，不使用系统钥匙串。已有邮件会保留。</p>
+              <label>授权码<input type="password" autoComplete="new-password" required value={credentialSecret} disabled={savingCredentials} onChange={(event) => setCredentialSecret(event.target.value)} /></label>
+              {credentialAccount.incomingConfigured && credentialAccount.outgoingConfigured && <label>独立发件授权码（可选）<input type="password" autoComplete="new-password" value={outgoingSecret} disabled={savingCredentials} onChange={(event) => setOutgoingSecret(event.target.value)} placeholder="留空则收发共用授权码" /></label>}
+              <div><button className="text-action" type="button" disabled={savingCredentials} onClick={() => { setCredentialAccount(null); setCredentialSecret(''); setOutgoingSecret(''); }}>取消</button><button className="primary-action" disabled={savingCredentials || !credentialSecret.trim()}>{savingCredentials ? '正在保存…' : '保存并重试'}</button></div>
+            </form>
+          )}
+          {credentialFeedback && <p role="status">{credentialFeedback}</p>}
           {accountError && (
             <div className="setting-feedback is-error" role="alert">
               <Icon name="close" size={16} />

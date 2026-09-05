@@ -8,10 +8,10 @@ Mutsumi Mail 是一个 Rust + Tauri v2 + React/Vite 的离线优先桌面邮件�
 - QQ、网易 163 和 Generic IMAP/SMTP 添加流程；只有 IMAP 与 SMTP 都验证成功后才保存账户，失败不会进入主界面或启动同步。
 - 多账户独立同步、统一收件箱、单账户范围切换，以及按收件账户回复和按所选账户发信。
 - 严格的 IMAP TLS/STARTTLS 会话、文件夹发现、UID 增量同步、历史回填、UIDVALIDITY 处理、正文按需获取和本地操作上传。
-- Rust 后台同步 supervisor：自动收件账户保持一个 IMAP `IDLE` 监听，服务端事件才触发增量同步；不支持 `IDLE` 的旧服务器才使用桌面 30 分钟、移动端前台 60 分钟的低频兜底。认证或钥匙串失败会停止自动重试，等待用户主动重连。
+- Rust 后台同步 supervisor：自动收件账户保持一个 IMAP `IDLE` 监听，服务端事件才触发增量同步；不支持 `IDLE` 的旧服务器才使用桌面 30 分钟、移动端前台 60 分钟的低频兜底。认证或本地凭据缺失会停止自动重试，可在设置中更新授权码。
 - SMTP 发送前校验、持久化发件队列、稳定 Message-ID 与不可变 MIME 快照；结果不确定时不会盲目重发。
 - SQLite migration：accounts、mailboxes、messages、instances、drafts、outbox、pending operations、sync cursors、FTS5。
-- 统一的 `SecretStore` 接口按平台接入原生安全存储：macOS Keychain、iOS Protected Data、Android Keystore 加密存储、Windows Credential Manager、Linux Secret Service。SQLite 只保留 `secret_ref`，不保存凭据明文；进程内串行读取并缓存，收发使用同一授权码时只创建一个凭据项目。
+- 授权码保存在本机应用目录的 `credentials/credentials.sqlite3`，不依赖系统钥匙串；Unix 文件权限为 `0600`。旧 macOS 凭据尝试静默迁移，失败可在原账户中更新授权码，保留缓存邮件。
 - 桌面单实例保护；重复打开只聚焦已有窗口，不会启动第二套同步任务或重复请求钥匙串授权。
 - 本地虚拟化邮件列表、安全文本阅读、草稿自动保存、可恢复发件队列和覆盖发件人/收件人的 FTS5 搜索。
 

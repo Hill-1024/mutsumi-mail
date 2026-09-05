@@ -315,7 +315,7 @@ export function AccountWizard({
                   : provider.id === 'cloudflare-smtp'
                     ? 'Cloudflare API Token'
                     : '密码或授权码'}</span>
-              <input {...register('secret')} type="password" autoComplete="new-password" placeholder="仅保存到系统安全存储" disabled={isVerifying} aria-invalid={Boolean(errors.secret)} />
+              <input {...register('secret')} type="password" autoComplete="new-password" placeholder="仅保存在本机应用目录" disabled={isVerifying} aria-invalid={Boolean(errors.secret)} />
               {errors.secret && <em>{errors.secret.message}</em>}
             </label>
 

@@ -526,6 +526,22 @@ pub fn get_account_status(
 }
 
 #[tauri::command]
+pub fn update_account_credentials(
+    state: State<'_, AppState>,
+    account_id: String,
+    secret: String,
+    outgoing_secret: Option<String>,
+) -> Result<(), AppErrorDto> {
+    crate::application::account_service::update_credentials(
+        &state,
+        &account_id,
+        &secret,
+        outgoing_secret.as_deref(),
+    )
+    .map_err(AppErrorDto::from)
+}
+
+#[tauri::command]
 pub fn reconnect_account(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
