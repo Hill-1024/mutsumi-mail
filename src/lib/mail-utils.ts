@@ -54,65 +54,8 @@ export function safeHtmlToText(html: string): string {
   return (doc.body.textContent ?? '').replace(/\s+/g, ' ').trim();
 }
 
-export function sanitizeHtmlForDisplay(html: string, blockRemoteContent: boolean): string {
-  if (typeof DOMParser === 'undefined') return '';
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  doc.querySelectorAll('script,style,iframe,object,embed,form,meta,link,base').forEach((node) => node.remove());
-  const allowedTags = new Set([
-    'a', 'abbr', 'b', 'blockquote', 'br', 'caption', 'center', 'code', 'col', 'colgroup',
-    'del', 'div', 'em', 'font', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img',
-    'ins', 'li', 'ol', 'p', 'pre', 's', 'small', 'span', 'strong', 'sub', 'sup', 'table',
-    'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul',
-  ]);
-  const allowedAttributes = new Set([
-    'align', 'alt', 'border', 'cellpadding', 'cellspacing', 'colspan', 'height', 'href',
-    'rowspan', 'src', 'style', 'title', 'valign', 'width',
-  ]);
-  doc.body.querySelectorAll('*').forEach((node) => {
-    if (!allowedTags.has(node.tagName.toLowerCase())) {
-      node.replaceWith(...node.childNodes);
-      return;
-    }
-    for (const attribute of [...node.attributes]) {
-      const name = attribute.name.toLowerCase();
-      const value = attribute.value.trim();
-      if (!allowedAttributes.has(name)) {
-        node.removeAttribute(attribute.name);
-        continue;
-      }
-      if (name === 'style') {
-        // Parse declarations instead of stripping substrings: CSS escapes and
-        // protocol-relative URLs must not bypass remote-content blocking.
-        const style = document.createElement('span').style;
-        style.cssText = value;
-        const allowedStyles = /^(?:color|background-color|font-(?:family|size|weight|style)|text-(?:align|decoration|indent)|line-height|letter-spacing|white-space|word-break|overflow-wrap|border(?:-(?:top|right|bottom|left))?(?:-(?:width|style|color))?|border-collapse|border-spacing|padding(?:-(?:top|right|bottom|left))?|margin(?:-(?:top|right|bottom|left))?|(?:max-|min-)?(?:width|height)|vertical-align)$/;
-        const cleaned: string[] = [];
-        for (const property of Array.from(style)) {
-          const declaration = style.getPropertyValue(property);
-          if (allowedStyles.test(property) && !/[\\]|url\s*\(|expression\s*\(|var\s*\(/i.test(declaration)) {
-            cleaned.push(`${property}:${declaration}`);
-          }
-        }
-        if (cleaned.length) node.setAttribute('style', cleaned.join(';'));
-        else node.removeAttribute('style');
-      }
-      if (name === 'href' && !/^(?:https?:\/\/|mailto:)/i.test(value)) {
-        node.removeAttribute(attribute.name);
-      }
-    }
-    if (node instanceof HTMLImageElement) {
-      const source = node.getAttribute('src') ?? '';
-      const embeddedImage = /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(source);
-      if (!embeddedImage && (blockRemoteContent || !/^https?:\/\//i.test(source))) {
-        node.removeAttribute('src');
-        node.alt = node.alt || '远程图片已阻止';
-      }
-    }
-
-    if (node instanceof HTMLAnchorElement) {
-      node.target = '_blank';
-      node.rel = 'noopener noreferrer';
-    }
-  });
-  return doc.body.innerHTML;
+// Preserve authored markup, styles and images. The reader hosts this document
+// in an opaque-origin iframe; no email scripts receive app or Tauri access.
+export function buildEmailDocument(html: string): string {
+  return `<!doctype html><meta charset="utf-8"><base target="_blank"><meta name="viewport" content="width=device-width, initial-scale=1"><style>html{color-scheme:light}body{margin:16px;overflow-wrap:break-word}</style>${html}`;
 }

@@ -1,7 +1,7 @@
 use std::future::Future;
 
 use crate::app_state::AppState;
-use crate::backends::imap::{ImapIncomingBackend, MAX_MESSAGE_BYTES};
+use crate::backends::imap::ImapIncomingBackend;
 use crate::backends::incoming::{
     IncomingConfig, IncomingError, IncomingMailBackend, IncomingMessageFetch,
 };
@@ -120,17 +120,10 @@ where
     .ok_or_else(|| AppError::not_found("remote IMAP message"))?;
     validate_fetched_identity(&locator, &fetched)?;
 
-    let size_bytes = fetched.message.size_bytes.map(u64::from);
-    let raw = fetched.message.raw_rfc822.ok_or_else(|| {
-        if size_bytes.is_some_and(|size| size > MAX_MESSAGE_BYTES) {
-            AppError::Capability(format!(
-                "邮件超过 {} MiB 的正文下载上限",
-                MAX_MESSAGE_BYTES / (1024 * 1024)
-            ))
-        } else {
-            AppError::Protocol("IMAP 服务器未返回请求的邮件正文".into())
-        }
-    })?;
+    let raw = fetched
+        .message
+        .raw_rfc822
+        .ok_or_else(|| AppError::Protocol("IMAP 服务器未返回请求的邮件正文".into()))?;
     let parsed = parse_rfc822(&raw)
         .ok_or_else(|| AppError::Protocol("无法解析 IMAP 服务器返回的 RFC 822 邮件".into()))?;
     let body = HydratedMessageBody {

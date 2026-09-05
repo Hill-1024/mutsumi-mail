@@ -3535,3 +3535,12 @@ textarea:focus-visible {
 .credential-form label { display: grid; gap: 8px; margin: 16px 0; }
 .credential-form input { min-width: 0; min-height: 56px; padding: 12px 16px; border: 1px solid var(--md-sys-color-outline); border-radius: var(--md-sys-shape-corner-extra-small); background: transparent; color: var(--md-sys-color-on-surface); }
 .credential-form > div { display: flex; justify-content: flex-end; gap: 8px; }
+
+iframe.reader-html-body {
+  display: block;
+  width: 100%;
+  height: max(480px, 65dvh);
+  border: 0;
+  background: white;
+  color-scheme: light;
+}

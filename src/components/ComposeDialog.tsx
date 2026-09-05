@@ -25,8 +25,6 @@ const composeSchema = z.object({
 
 type ComposeForm = z.infer<typeof composeSchema>;
 
-const MAX_ATTACHMENT_COUNT = 20;
-const MAX_ATTACHMENT_BYTES = 18 * 1024 * 1024;
 
 function fileNameFromPath(path: string): string {
   const withoutQuery = path.split('?')[0] ?? path;
@@ -257,12 +255,6 @@ export function ComposeDialog({
       setStatusMessage('附件选择需要在已安装的 Mutsumi Mail 客户端中完成。');
       return;
     }
-    if (attachments.length >= MAX_ATTACHMENT_COUNT) {
-      setStatus('error');
-      setStatusMessage(`一次最多添加 ${MAX_ATTACHMENT_COUNT} 个附件。`);
-      return;
-    }
-
     setSelectingAttachments(true);
     setStatus('idle');
     setStatusMessage('');
@@ -278,10 +270,6 @@ export function ComposeDialog({
       });
       const paths = Array.isArray(selection) ? selection : selection ? [selection] : [];
       if (!paths.length) return;
-      if (attachments.length + paths.length > MAX_ATTACHMENT_COUNT) {
-        throw new Error(`一次最多添加 ${MAX_ATTACHMENT_COUNT} 个附件。`);
-      }
-
       const selected = await Promise.all(
         paths.map(async (path) => {
           const bytes = await readFile(path);
@@ -292,10 +280,6 @@ export function ComposeDialog({
           } satisfies DraftAttachment;
         }),
       );
-      const total = [...attachments, ...selected].reduce((sum, attachment) => sum + attachment.bytes.length, 0);
-      if (total > MAX_ATTACHMENT_BYTES) {
-        throw new Error('附件总大小最多 18 MB；请移除部分文件后重试。');
-      }
       setAttachments((current) => [...current, ...selected]);
     } catch (error) {
       setStatus('error');

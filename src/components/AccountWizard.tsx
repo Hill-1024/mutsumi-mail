@@ -10,7 +10,7 @@ import type { Account, AppErrorDto, ProviderPreset } from '../types';
 const accountSchema = z.object({
   email: z.string().trim().email('请输入有效的邮箱地址'),
   displayName: z.string().trim().optional(),
-  secret: z.string().min(1, '请输入客户端授权码或安全凭据'),
+  secret: z.string().min(1, '请输入密码或授权码'),
   outgoingSecret: z.string().optional(),
   incomingHost: z.string().optional(),
   incomingPort: z.string().optional(),
@@ -315,14 +315,14 @@ export function AccountWizard({
                   : provider.id === 'cloudflare-smtp'
                     ? 'Cloudflare API Token'
                     : '密码或授权码'}</span>
-              <input {...register('secret')} type="password" autoComplete="new-password" placeholder="仅保存在本机应用目录" disabled={isVerifying} aria-invalid={Boolean(errors.secret)} />
+              <input {...register('secret')} type="password" autoComplete="new-password" placeholder="请输入密码或授权码" disabled={isVerifying} aria-invalid={Boolean(errors.secret)} />
               {errors.secret && <em>{errors.secret.message}</em>}
             </label>
 
             {provider.id === 'generic' && (
               <label className="form-field">
                 <span>SMTP 密码或授权码（可选）</span>
-                <input {...register('outgoingSecret')} type="password" autoComplete="new-password" placeholder="留空则与收件凭据相同" disabled={isVerifying} />
+                <input {...register('outgoingSecret')} type="password" autoComplete="new-password" placeholder="留空则与收件授权码相同" disabled={isVerifying} />
               </label>
             )}
 

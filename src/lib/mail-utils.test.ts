@@ -4,7 +4,7 @@ import {
   normalizeSubject,
   parseSearch,
   safeHtmlToText,
-  sanitizeHtmlForDisplay,
+  buildEmailDocument,
 } from './mail-utils';
 import type { Message } from '../types';
 
@@ -48,25 +48,10 @@ describe('mail utilities', () => {
     expect(safeHtmlToText('<p>Hello</p><script>steal()</script><form>bad</form>')).toBe('Hello');
   });
 
-  it('保留安全邮件排版并移除脚本、事件和远程图片', () => {
-    const html = sanitizeHtmlForDisplay(
-      '<table><tr><td style="color:red">Hello</td></tr></table><script>bad()</script><img src="https://tracker.example/pixel" onerror="bad()">',
-      true,
-    );
-    expect(html).toContain('<table>');
-    expect(html).toContain('color:red');
-    expect(html).not.toContain('<script');
-    expect(html).not.toContain('onerror');
-    expect(html).not.toContain('tracker.example');
+  it('preserves the complete authored HTML document including styles and images', () => {
+    const original = '<html><head><style>.hero{display:grid;background:#ffc}</style></head><body><div class="hero"><img src="https://example.com/logo.png">正文</div></body></html>';
+    expect(buildEmailDocument(original)).toContain(original);
   });
-});
-
-it('blocks protocol-relative trackers, relative requests, escaped CSS and unsafe link schemes', () => {
-  const html = sanitizeHtmlForDisplay('<img src="//tracker.example/pixel"><img src="/private"><a href="java&#10;script:alert(1)">bad</a><a href="data:text/html,test">data</a><p style="background-image:u\\72l(https://tracker.example);color:red;position:fixed">body</p>', true);
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  expect(doc.querySelectorAll('[src],a[href]').length).toBe(0);
-  expect(doc.querySelector('p')?.getAttribute('style')).toBe('color:red');
-  expect(sanitizeHtmlForDisplay('<img src="https://example.com/image.png">', false)).toContain('src="https://example.com/image.png"');
 });
 
 it('applies recipient, account and folder filters instead of silently ignoring them', () => {

@@ -296,9 +296,6 @@ fn outgoing_session(
     Ok((config, secret, envelope_from))
 }
 
-const MAX_ATTACHMENT_COUNT: usize = 20;
-const MAX_ATTACHMENT_BYTES: usize = 18 * 1024 * 1024;
-
 fn build_mime(
     draft: &OutboxDraft,
     envelope_from: &str,
@@ -306,7 +303,6 @@ fn build_mime(
     rfc_message_id: &str,
     attachments: &[DraftAttachment],
 ) -> Result<Vec<u8>, AppError> {
-    validate_attachments(attachments)?;
     let mut builder =
         Message::builder()
             .from(envelope_from.parse().map_err(|error| {
@@ -368,25 +364,6 @@ fn build_mime(
             formatted
         })
         .map_err(|error| AppError::InvalidConfiguration(format!("无法生成 MIME：{error}")))
-}
-
-fn validate_attachments(attachments: &[DraftAttachment]) -> Result<(), AppError> {
-    if attachments.len() > MAX_ATTACHMENT_COUNT {
-        return Err(AppError::InvalidConfiguration(format!(
-            "一次最多添加 {MAX_ATTACHMENT_COUNT} 个附件"
-        )));
-    }
-    let total = attachments.iter().try_fold(0_usize, |total, attachment| {
-        total
-            .checked_add(attachment.bytes.len())
-            .ok_or_else(|| AppError::InvalidConfiguration("附件总大小超出限制".into()))
-    })?;
-    if total > MAX_ATTACHMENT_BYTES {
-        return Err(AppError::InvalidConfiguration(
-            "附件总大小最多 18 MiB，以避免 SMTP 编码后超出常见服务商限制".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn safe_attachment_name(name: &str) -> String {
@@ -666,5 +643,36 @@ mod tests {
             sent_copy_policy(&config("smtp.example.com")),
             SentCopyPolicy::Unknown
         );
+    }
+    #[test]
+    fn accepts_attachments_above_previous_client_size_and_count_limits() {
+        let draft = OutboxDraft {
+            account_id: "account".into(),
+            to: vec!["to@example.com".into()],
+            cc: vec![],
+            bcc: vec![],
+            subject: "Large attachments".into(),
+            body_text: "Body".into(),
+            in_reply_to: None,
+            references: vec![],
+        };
+        let mut attachments: Vec<_> = (0..21)
+            .map(|index| DraftAttachment {
+                name: format!("file-{index}.txt"),
+                content_type: "text/plain".into(),
+                bytes: vec![b'a'],
+            })
+            .collect();
+        attachments[0].bytes = vec![0; 19 * 1024 * 1024];
+        let mime = build_mime(
+            &draft,
+            "from@example.com",
+            &draft.to,
+            "<large@example.com>",
+            &attachments,
+        )
+        .unwrap();
+        assert!(mime.len() > 19 * 1024 * 1024);
+        assert!(String::from_utf8_lossy(&mime).contains("file-20.txt"));
     }
 }

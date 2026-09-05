@@ -16,9 +16,9 @@ pub enum SecretStoreError {
     #[cfg(any(target_os = "macos", test))]
     #[error("platform credential store unavailable: {0}")]
     Unavailable(String),
-    #[error("尚未保存本地授权码，请在设置中更新账户授权码")]
+    #[error("授权码不可用，请在设置中更新授权码")]
     NotFound,
-    #[error("无法读写本地授权码，请检查应用目录是否可写")]
+    #[error("无法保存或读取授权码，请重启应用后重试")]
     OperationFailed,
 }
 

@@ -39,8 +39,7 @@ pub fn parse_rfc822(raw: &[u8]) -> Option<ParsedMessage> {
         .unwrap_or_default();
     let in_reply_to = message.in_reply_to().as_text().map(ToString::to_string);
     let text = message.body_text(0).map(|value| value.into_owned());
-    // The web layer performs a strict DOM allow-list pass before rendering. Keeping the HTML
-    // here preserves layout while the CSP remains the final network/script boundary.
+    // Preserve authored HTML; the reader renders it in an isolated document.
     let html_text = message.body_html(0).map(|value| value.into_owned());
     let preview = message
         .body_preview(240)

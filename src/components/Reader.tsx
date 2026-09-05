@@ -3,7 +3,7 @@ import type { AttachmentInfo, Message } from '../types';
 import { Icon } from '../lib/icons';
 import { useUiStore } from '../stores/ui';
 import { downloadAttachment, isTauriRuntime } from '../lib/tauri';
-import { safeHtmlToText, sanitizeHtmlForDisplay } from '../lib/mail-utils';
+import { safeHtmlToText, buildEmailDocument } from '../lib/mail-utils';
 
 interface ReaderProps {
   message: Message;
@@ -30,7 +30,7 @@ const formatFullDate = (value: string) => {
 };
 
 export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryBody, onBack, onMutate, onArchive, onDelete }: ReaderProps) {
-  const { openComposeWithDraft, safeReading } = useUiStore();
+  const { openComposeWithDraft } = useUiStore();
   const [attachmentStatus, setAttachmentStatus] = useState('');
   const [attachmentPreview, setAttachmentPreview] = useState<{
     name: string;
@@ -46,9 +46,9 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
   const initials = message.from.name
     ? message.from.name.split(' ').map((part) => part[0]).join('').slice(0, 2).toUpperCase()
     : message.from.email.slice(0, 2).toUpperCase();
-  const safeHtml = useMemo(
-    () => (message.bodyHtmlText ? sanitizeHtmlForDisplay(message.bodyHtmlText, safeReading) : ''),
-    [message.bodyHtmlText, safeReading],
+  const htmlDocument = useMemo(
+    () => (message.bodyHtmlText ? buildEmailDocument(message.bodyHtmlText) : ''),
+    [message.bodyHtmlText],
   );
   const readableBody = message.bodyText ?? (message.bodyHtmlText ? safeHtmlToText(message.bodyHtmlText) : message.preview);
 
@@ -184,13 +184,6 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
           )}
         </div>
 
-        {safeReading && (
-          <div className="reader-safety" title="远程图片与外部脚本已拦截">
-            <Icon name="shield" size={16} />
-            <span>已阻止远程内容</span>
-          </div>
-        )}
-
         {bodyLoading && <div className="reader-body-status" role="status"><span className="spinner" />正在下载正文…</div>}
         {!bodyLoading && bodyError && (
           <div className="reader-body-status is-error" role="alert">
@@ -199,9 +192,9 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
           </div>
         )}
 
-        <div className={`reader-body ${safeHtml ? 'is-html' : ''}`}>
-          {safeHtml ? (
-            <div className="reader-html-body" dangerouslySetInnerHTML={{ __html: safeHtml }} />
+        <div className={`reader-body ${htmlDocument ? 'is-html' : ''}`}>
+          {htmlDocument ? (
+            <iframe className="reader-html-body" title="邮件正文" srcDoc={htmlDocument} sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" />
           ) : readableBody.split('\n').map((paragraph, index) =>
             paragraph.trim() ? (
               <p key={`${message.id}-${index}`}>{paragraph}</p>

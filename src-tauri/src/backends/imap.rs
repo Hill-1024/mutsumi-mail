@@ -30,15 +30,9 @@ const MAILBOX_INDEX_RESPONSE_LIMIT: usize = 32 * 1024 * 1024;
 // Must stay at least as large as sync_service::MAILBOX_FETCH_LIMIT so the
 // caller never mistakes an internally truncated page for a complete snapshot.
 pub(crate) const MAX_FETCH_MESSAGES: u32 = 250;
-// Large attachment-bearing messages routinely exceed the old 25 MiB guard after MIME/base64
-// expansion. Keep a defensive ceiling, but do not reject otherwise valid messages at the same
-// size many SMTP providers use as their *sending* limit.
-pub(crate) const MAX_MESSAGE_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_SYNC_BODY_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_BATCH_BODY_BYTES: u64 = 64 * 1024 * 1024;
-const BODY_RESPONSE_LIMIT: usize = MAX_MESSAGE_BYTES as usize + 64 * 1024;
 const BATCH_BODY_RESPONSE_LIMIT: usize = MAX_BATCH_BODY_BYTES as usize + 2 * 1024 * 1024;
-const MAX_APPEND_BYTES: usize = 64 * 1024 * 1024;
 const MESSAGE_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (DATE FROM TO CC BCC REPLY-TO SUBJECT MESSAGE-ID REFERENCES IN-REPLY-TO CONTENT-TYPE MIME-VERSION)])";
 
 pub struct ImapIncomingBackend {
@@ -611,12 +605,6 @@ where
         raw_rfc822: &[u8],
         mark_seen: bool,
     ) -> Result<CommandResult, IncomingError> {
-        if raw_rfc822.len() > MAX_APPEND_BYTES {
-            return Err(IncomingError::Unsupported(format!(
-                "IMAP APPEND payload exceeds the {} MiB safety limit",
-                MAX_APPEND_BYTES / (1024 * 1024)
-            )));
-        }
         let tag = self.next_command_tag()?;
         let flags = if mark_seen { " (\\Seen)" } else { "" };
         let prefix = format!(
@@ -1441,7 +1429,7 @@ where
         .filter_map(|message| {
             let size = u64::from(message.size_bytes?);
             // Initial sync stays metadata-first for large messages. The reader can fetch one
-            // selected message up to MAX_MESSAGE_BYTES without making background sync allocate
+            // selected message on demand without making background sync allocate
             // the same amount for every item in a page.
             if size > MAX_SYNC_BODY_BYTES || size > body_budget {
                 return None;
@@ -1529,25 +1517,10 @@ where
     let Some(mut message) = messages.pop() else {
         return Ok(None);
     };
-    let Some(size) = message.size_bytes.map(u64::from) else {
-        return Ok(Some(IncomingMessageFetch {
-            remote_id: mailbox.to_owned(),
-            uid_validity: selected.uid_validity,
-            message,
-        }));
-    };
-    if size > MAX_MESSAGE_BYTES {
-        return Ok(Some(IncomingMessageFetch {
-            remote_id: mailbox.to_owned(),
-            uid_validity: selected.uid_validity,
-            message,
-        }));
-    }
-
     let body_result = session
         .execute(
             &format!("UID FETCH {uid} (UID BODY.PEEK[])"),
-            BODY_RESPONSE_LIMIT,
+            usize::MAX,
             false,
         )
         .await?;
@@ -1562,9 +1535,7 @@ where
             ));
         }
         if let Some(body) = body {
-            if u64::try_from(body.len()).unwrap_or(u64::MAX) <= MAX_MESSAGE_BYTES {
-                message.raw_rfc822 = Some(body);
-            }
+            message.raw_rfc822 = Some(body);
         }
     }
     Ok(Some(IncomingMessageFetch {
@@ -2472,7 +2443,7 @@ mod tests {
             "* 1 EXISTS\r\n* OK [UIDVALIDITY 51] valid\r\nA0001 OK examine\r\n\
              * 1 FETCH (UID 7 FLAGS () RFC822.SIZE {})\r\nA0002 OK metadata\r\n\
              * 1 FETCH (UID 7 BODY[] {{{}}}\r\n",
-            raw.len(),
+            101 * 1024 * 1024, // Server metadata must not impose a client-side cutoff.
             raw.len()
         )
         .into_bytes();

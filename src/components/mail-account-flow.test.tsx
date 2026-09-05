@@ -433,7 +433,9 @@ describe('邮箱账户关键流程', () => {
 
     render(<Reader message={message} accountEmail="second@163.com" />);
 
-    expect(screen.getByText('完整 HTML 正文').closest('table')).not.toBeNull();
+    const frame = screen.getByTitle('邮件正文') as HTMLIFrameElement;
+    expect(frame.srcdoc).toContain(message.bodyHtmlText);
+    expect(frame.getAttribute('sandbox')).toBe('allow-popups allow-popups-to-escape-sandbox');
     expect(document.querySelector('script')).toBeNull();
     expect(screen.getByText('报告.pdf')).toBeTruthy();
     expect(screen.getByRole('button', { name: '查看' })).toBeTruthy();

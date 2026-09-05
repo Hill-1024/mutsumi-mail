@@ -330,8 +330,6 @@ export function SettingsView({
     androidDynamicColor,
     setAndroidDynamicColor,
     setAndroidDynamicSeed,
-    safeReading,
-    toggleSafeReading,
     setSafeReading,
     setNavPage,
   } = useUiStore();
@@ -431,12 +429,6 @@ export function SettingsView({
     void updateSettings({ androidDynamicColor: enabled }).catch(() =>
       setAndroidDynamicColor(!enabled),
     );
-  };
-
-  const changeSafeReading = () => {
-    const nextValue = !safeReading;
-    toggleSafeReading();
-    void updateSettings({ safeReading: nextValue }).catch(() => setSafeReading(safeReading));
   };
 
   const manageCache = async () => {
@@ -576,7 +568,7 @@ export function SettingsView({
               void updateAccountCredentials(credentialAccount.id, credentialSecret, outgoingSecret || undefined)
                 .then(async () => {
                   setCredentialSecret(''); setOutgoingSecret(''); setCredentialAccount(null);
-                  setCredentialFeedback('授权码已保存在本地。');
+                  setCredentialFeedback('授权码已更新。');
                   if (credentialAccount.incomingConfigured && credentialAccount.enabled) {
                     try { await startSync(credentialAccount.id); } catch (error) { setCredentialFeedback(`授权码已保存；${appErrorMessage(error)}`); }
                   }
@@ -586,7 +578,7 @@ export function SettingsView({
                 .finally(() => setSavingCredentials(false));
             }}>
               <h3>更新 {credentialAccount.email} 的授权码</h3>
-              <p>保存在本机应用目录，不使用系统钥匙串。已有邮件会保留。</p>
+              <p>请填写邮箱服务商提供的最新授权码。</p>
               <label>授权码<input type="password" autoComplete="new-password" required value={credentialSecret} disabled={savingCredentials} onChange={(event) => setCredentialSecret(event.target.value)} /></label>
               {credentialAccount.incomingConfigured && credentialAccount.outgoingConfigured && <label>独立发件授权码（可选）<input type="password" autoComplete="new-password" value={outgoingSecret} disabled={savingCredentials} onChange={(event) => setOutgoingSecret(event.target.value)} placeholder="留空则收发共用授权码" /></label>}
               <div><button className="text-action" type="button" disabled={savingCredentials} onClick={() => { setCredentialAccount(null); setCredentialSecret(''); setOutgoingSecret(''); }}>取消</button><button className="primary-action" disabled={savingCredentials || !credentialSecret.trim()}>{savingCredentials ? '正在保存…' : '保存并重试'}</button></div>
@@ -742,31 +734,6 @@ export function SettingsView({
               </button>
             </div>
           )}
-        </div>
-
-        <div className="settings-section">
-          <div className="settings-section-title">
-            <Icon name="shield" size={20} />
-            <h2>隐私与安全</h2>
-          </div>
-          <div className="setting-row">
-            <div>
-              <strong>安全阅读</strong>
-              <span>阻止远程图片、脚本和表单。</span>
-            </div>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={safeReading}
-              className={`m3-switch ${safeReading ? 'is-on' : ''}`}
-              onClick={changeSafeReading}
-              title={safeReading ? '已开启安全阅读' : '已关闭安全阅读'}
-            >
-              <span className="m3-switch-thumb">
-                <Icon name={safeReading ? 'check' : 'close'} size={12} strokeWidth={2.5} />
-              </span>
-            </button>
-          </div>
         </div>
 
         <div className="settings-section">
