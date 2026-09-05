@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useDialogFocus } from '../lib/use-dialog-focus';
 import { Icon } from '../lib/icons';
 import { appErrorMessage, createAccount, providerPresets } from '../lib/tauri';
 import type { Account, AppErrorDto, ProviderPreset } from '../types';
@@ -73,6 +74,7 @@ export function AccountWizard({
   onSaved: (account: Account) => void;
   canClose?: boolean;
 }) {
+  const dialogRef = useDialogFocus<HTMLElement>();
   const [step, setStep] = useState<1 | 2>(1);
   const [provider, setProvider] = useState<ProviderPreset | null>(null);
   const [submitState, setSubmitState] = useState<SubmitState>('idle');
@@ -234,7 +236,7 @@ export function AccountWizard({
         if (canClose && !isVerifying && event.target === event.currentTarget) onClose();
       }}
     >
-      <section className="wizard-dialog" role="dialog" aria-modal="true" aria-labelledby="wizard-title" aria-busy={isVerifying}>
+      <section ref={dialogRef} className="wizard-dialog" role="dialog" aria-modal="true" aria-labelledby="wizard-title" aria-busy={isVerifying}>
         <header className="wizard-header">
           <h2 id="wizard-title">添加邮箱</h2>
           {canClose && (

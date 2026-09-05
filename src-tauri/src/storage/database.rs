@@ -13,9 +13,11 @@ use crate::backends::{
 use crate::domain::message::normalize_subject;
 use crate::domain::sync_cursor::SyncCursor;
 use crate::domain::{
-    account::CreateAccountInput, Account, Address, DraftInput, Mailbox, Message, OutboxItem,
+    account::CreateAccountInput, Account, Address, AttachmentInfo, DraftInput, Mailbox, Message,
+    OutboxItem,
 };
 use crate::errors::AppError;
+use crate::mime::parser::ParsedAttachment;
 use crate::providers::registry::ProviderPreset;
 
 pub struct Database {
@@ -97,6 +99,7 @@ pub struct HydratedMessageBody {
     pub body_text: Option<String>,
     pub body_html_text: Option<String>,
     pub has_attachment: bool,
+    pub attachments: Vec<ParsedAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -196,7 +199,10 @@ impl Database {
 
     fn migrate(&mut self) -> Result<(), AppError> {
         self.connection
-            .execute_batch(include_str!("../../migrations/0001_init.sql"))
+            .execute_batch(concat!(
+                include_str!("../../migrations/0001_init.sql"),
+                "\nCREATE TABLE IF NOT EXISTS attachment_payloads (attachment_id TEXT PRIMARY KEY NOT NULL REFERENCES attachments(id) ON DELETE CASCADE, bytes BLOB NOT NULL);"
+            ))
             .map_err(AppError::from)
     }
 
@@ -1364,7 +1370,9 @@ impl Database {
         let row = self
             .connection
             .query_row(
-                r#"SELECT m.id,mi.id,m.account_id,mailbox.id,mailbox.remote_id,mi.uid_validity,mi.uid,m.updated_at,m.body_cache_state,account.enabled
+                r#"SELECT m.id,mi.id,m.account_id,mailbox.id,mailbox.remote_id,mi.uid_validity,mi.uid,m.updated_at,
+                          CASE WHEN m.body_cache_state='full' AND (m.has_attachment=0 OR EXISTS(SELECT 1 FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id)) THEN 'full' ELSE 'none' END,
+                          account.enabled
                    FROM messages m
                    JOIN accounts account ON account.id=m.account_id
                    JOIN message_instances mi ON mi.message_id=m.id
@@ -1499,8 +1507,64 @@ impl Database {
         if updated != 1 {
             return Err(AppError::not_found("message"));
         }
+        tx.execute(
+            "DELETE FROM message_parts WHERE message_id=?",
+            [&locator.message_id],
+        )
+        .map_err(AppError::from)?;
+        for (position, attachment) in body.attachments.iter().enumerate() {
+            let part_id = Uuid::new_v4().to_string();
+            let attachment_id = Uuid::new_v4().to_string();
+            let filename = sanitize_attachment_filename(&attachment.filename, position);
+            tx.execute(
+                "INSERT INTO message_parts (id,message_id,mime_type,size_bytes,body_cache_state) VALUES (?,?,?,?, 'full')",
+                params![part_id, locator.message_id, attachment.content_type, attachment.bytes.len() as i64],
+            ).map_err(AppError::from)?;
+            tx.execute(
+                "INSERT INTO attachments (id,message_part_id,filename,sanitized_filename,content_type,size_bytes,download_state) VALUES (?,?,?,?,?,?,'downloaded')",
+                params![attachment_id, part_id, attachment.filename, filename, attachment.content_type, attachment.bytes.len() as i64],
+            ).map_err(AppError::from)?;
+            tx.execute(
+                "INSERT INTO attachment_payloads (attachment_id,bytes) VALUES (?,?)",
+                params![attachment_id, attachment.bytes],
+            )
+            .map_err(AppError::from)?;
+        }
         tx.commit().map_err(AppError::from)?;
-        self.get_message_in_mailbox(&locator.message_id, &locator.mailbox_id)
+        let mut message = self.get_message_in_mailbox(&locator.message_id, &locator.mailbox_id)?;
+        message.attachments = self.list_attachments(&locator.message_id)?;
+        message.attachment_count = message.attachments.len() as i64;
+        Ok(message)
+    }
+
+    pub fn list_attachments(&self, message_id: &str) -> Result<Vec<AttachmentInfo>, AppError> {
+        let mut statement = self.connection.prepare(
+            "SELECT attachment.id,COALESCE(attachment.sanitized_filename,attachment.filename,'attachment'),attachment.content_type,COALESCE(attachment.size_bytes,0) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=? ORDER BY part.rowid,attachment.rowid",
+        ).map_err(AppError::from)?;
+        let attachments = statement
+            .query_map([message_id], |row| {
+                Ok(AttachmentInfo {
+                    id: row.get(0)?,
+                    filename: row.get(1)?,
+                    content_type: row.get(2)?,
+                    size_bytes: row.get(3)?,
+                })
+            })
+            .map_err(AppError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from)?;
+        Ok(attachments)
+    }
+
+    pub fn attachment_payload(
+        &self,
+        attachment_id: &str,
+    ) -> Result<(AttachmentInfo, Vec<u8>), AppError> {
+        self.connection.query_row(
+            "SELECT attachment.id,COALESCE(attachment.sanitized_filename,attachment.filename,'attachment'),attachment.content_type,COALESCE(attachment.size_bytes,0),payload.bytes FROM attachments attachment JOIN attachment_payloads payload ON payload.attachment_id=attachment.id WHERE attachment.id=?",
+            [attachment_id],
+            |row| Ok((AttachmentInfo { id: row.get(0)?, filename: row.get(1)?, content_type: row.get(2)?, size_bytes: row.get(3)? }, row.get(4)?)),
+        ).optional().map_err(AppError::from)?.ok_or_else(|| AppError::not_found("attachment"))
     }
 
     /// Claims a bounded batch of durable IMAP mutations for one account. The
@@ -1692,11 +1756,7 @@ impl Database {
         .map_err(AppError::from)?;
         if !retryable && matches!(operation.0.as_str(), "move" | "trash" | "permanent_delete") {
             if let Some(instance_id) = operation.1 {
-                tx.execute(
-                    "UPDATE message_instances SET is_deleted=0 WHERE id=?",
-                    [instance_id],
-                )
-                .map_err(AppError::from)?;
+                restore_message_instance(&tx, &instance_id)?;
             }
         }
         tx.commit().map_err(AppError::from)
@@ -1721,14 +1781,28 @@ impl Database {
         let (instance_id, account_id, mut flags_json) =
             instance.ok_or_else(|| AppError::not_found("message instance"))?;
         let mut flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+        let was_read = flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
         update_flag(&mut flags, "\\Seen", is_read);
         update_flag(&mut flags, "\\Flagged", is_starred);
+        let is_now_read = flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
         flags_json = serde_json::to_string(&flags).map_err(AppError::from)?;
         tx.execute(
             "UPDATE message_instances SET flags_json=?,last_synced_at=? WHERE id=?",
             params![flags_json, Utc::now().to_rfc3339(), instance_id],
         )
         .map_err(AppError::from)?;
+        if was_read != is_now_read {
+            tx.execute(
+                "UPDATE mailboxes SET unread_count=MAX(0,unread_count+?) WHERE id=? AND account_id=?",
+                params![if is_now_read { -1 } else { 1 }, mailbox_id, account_id],
+            )
+            .map_err(AppError::from)?;
+            tx.execute(
+                r#"UPDATE threads SET unread_count=(SELECT count(DISTINCT message.id) FROM messages message JOIN message_instances instance ON instance.message_id=message.id WHERE message.thread_id=threads.id AND instance.is_deleted=0 AND instr(lower(instance.flags_json),'"\\seen"')=0) WHERE id=(SELECT thread_id FROM messages WHERE id=?)"#,
+                [message_id],
+            )
+            .map_err(AppError::from)?;
+        }
         tx.execute("INSERT INTO pending_operations (id,account_id,mailbox_id,message_instance_id,operation_type,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", params![Uuid::new_v4().to_string(), account_id, mailbox_id, instance_id, "set_flags", json!({ "is_read": is_read, "is_starred": is_starred }).to_string(), Utc::now().to_rfc3339(), Utc::now().to_rfc3339()]).map_err(AppError::from)?;
         tx.commit().map_err(AppError::from)?;
         self.get_message_in_mailbox(message_id, mailbox_id)
@@ -1774,8 +1848,10 @@ impl Database {
             let (instance_id, account_id, flags_json) =
                 instance.ok_or_else(|| AppError::not_found("message instance"))?;
             let mut flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+            let was_read = flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
             update_flag(&mut flags, "\\Seen", is_read);
             update_flag(&mut flags, "\\Flagged", is_starred);
+            let is_now_read = flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
             let next_flags_json = serde_json::to_string(&flags).map_err(AppError::from)?;
 
             tx.execute(
@@ -1783,6 +1859,18 @@ impl Database {
                 params![next_flags_json, now, instance_id],
             )
             .map_err(AppError::from)?;
+            if was_read != is_now_read {
+                tx.execute(
+                    "UPDATE mailboxes SET unread_count=MAX(0,unread_count+?) WHERE id=? AND account_id=?",
+                    params![if is_now_read { -1 } else { 1 }, mailbox_id, account_id],
+                )
+                .map_err(AppError::from)?;
+                tx.execute(
+                    r#"UPDATE threads SET unread_count=(SELECT count(DISTINCT message.id) FROM messages message JOIN message_instances instance ON instance.message_id=message.id WHERE message.thread_id=threads.id AND instance.is_deleted=0 AND instr(lower(instance.flags_json),'"\\seen"')=0) WHERE id=(SELECT thread_id FROM messages WHERE id=?)"#,
+                    [message_id],
+                )
+                .map_err(AppError::from)?;
+            }
             tx.execute(
                 "INSERT INTO pending_operations (id,account_id,mailbox_id,message_instance_id,operation_type,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
                 params![Uuid::new_v4().to_string(), account_id, mailbox_id, instance_id, "set_flags", json!({ "is_read": is_read, "is_starred": is_starred }).to_string(), now, now],
@@ -1812,7 +1900,9 @@ impl Database {
             .ok_or_else(|| AppError::not_found("target mailbox"))?;
         let now = Utc::now().to_rfc3339();
         let mut moved = 0;
+        let mut seen = HashSet::new();
         for (message_id, source_mailbox_id) in message_refs {
+            if !seen.insert((message_id, source_mailbox_id)) { continue; }
             let instance: Option<(String, String)> = tx
                 .query_row("SELECT mi.id,m.account_id FROM message_instances mi JOIN messages m ON m.id=mi.message_id JOIN mailboxes mailbox ON mailbox.id=mi.mailbox_id AND mailbox.account_id=m.account_id AND mailbox.selectable=1 WHERE mi.message_id=? AND mi.mailbox_id=? AND mi.is_deleted=0", params![message_id, source_mailbox_id], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()
@@ -1826,14 +1916,10 @@ impl Database {
                 if source_mailbox_id == target_mailbox_id {
                     continue;
                 }
-                tx.execute(
-                    "UPDATE message_instances SET is_deleted=1,last_synced_at=? WHERE id=?",
-                    params![now, instance_id],
-                )
-                .map_err(AppError::from)?;
+                hide_message_instance(&tx, &instance_id, source_mailbox_id, message_id, &now)?;
                 tx.execute("INSERT INTO pending_operations (id,account_id,mailbox_id,message_instance_id,operation_type,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", params![Uuid::new_v4().to_string(), account_id, source_mailbox_id, instance_id, "move", json!({ "from_mailbox_id": source_mailbox_id, "to_mailbox_id": target_mailbox_id, "message_id": message_id }).to_string(), now, now]).map_err(AppError::from)?;
                 moved += 1;
-            }
+            } else { return Err(AppError::not_found("message instance")); }
         }
         tx.commit().map_err(AppError::from)?;
         Ok(moved)
@@ -1847,20 +1933,27 @@ impl Database {
         let tx = self.connection.transaction().map_err(AppError::from)?;
         let now = Utc::now().to_rfc3339();
         let mut deleted = 0;
+        let mut seen = HashSet::new();
         for (message_id, mailbox_id) in message_refs {
+            if !seen.insert((message_id, mailbox_id)) { continue; }
             let instance: Option<(String, String)> = tx
                 .query_row("SELECT mi.id,m.account_id FROM message_instances mi JOIN messages m ON m.id=mi.message_id JOIN mailboxes mailbox ON mailbox.id=mi.mailbox_id AND mailbox.account_id=m.account_id AND mailbox.selectable=1 WHERE mi.message_id=? AND mi.mailbox_id=? AND mi.is_deleted=0", params![message_id, mailbox_id], |row| Ok((row.get(0)?, row.get(1)?)))
                 .optional()
                 .map_err(AppError::from)?;
             if let Some((instance_id, account_id)) = instance {
-                tx.execute(
-                    "UPDATE message_instances SET is_deleted=1,last_synced_at=? WHERE id=?",
-                    params![now, instance_id],
-                )
-                .map_err(AppError::from)?;
+                if !permanent {
+                    let has_trash: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM mailboxes WHERE account_id=? AND special_role='trash' AND selectable=1 AND id<>?)",
+                        params![account_id, mailbox_id], |row| row.get(0),
+                    ).map_err(AppError::from)?;
+                    if !has_trash {
+                        return Err(AppError::InvalidConfiguration("没有可用的回收站目标，邮件未被删除".into()));
+                    }
+                }
+                hide_message_instance(&tx, &instance_id, mailbox_id, message_id, &now)?;
                 tx.execute("INSERT INTO pending_operations (id,account_id,mailbox_id,message_instance_id,operation_type,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", params![Uuid::new_v4().to_string(), account_id, mailbox_id, instance_id, if permanent { "permanent_delete" } else { "trash" }, json!({ "message_id": message_id, "mailbox_id": mailbox_id, "permanent": permanent }).to_string(), now, now]).map_err(AppError::from)?;
                 deleted += 1;
-            }
+            } else { return Err(AppError::not_found("message instance")); }
         }
         tx.commit().map_err(AppError::from)?;
         Ok(deleted)
@@ -1871,6 +1964,13 @@ impl Database {
             .id
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let protected: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM drafts WHERE id=?1 AND (account_id<>?2 OR EXISTS(SELECT 1 FROM outbox WHERE draft_id=drafts.id)))",
+            params![id, input.account_id], |row| row.get(0),
+        ).map_err(AppError::from)?;
+        if protected {
+            return Err(AppError::InvalidConfiguration("不能覆盖其他账户或发件队列中的草稿".into()));
+        }
         let now = Utc::now().to_rfc3339();
         self.connection.execute("INSERT INTO drafts (id,account_id,to_json,cc_json,bcc_json,subject,body_text,in_reply_to,references_json,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET to_json=excluded.to_json,cc_json=excluded.cc_json,bcc_json=excluded.bcc_json,subject=excluded.subject,body_text=excluded.body_text,in_reply_to=excluded.in_reply_to,references_json=excluded.references_json,updated_at=excluded.updated_at", params![id, input.account_id, serde_json::to_string(&split_addresses(&input.to)).map_err(AppError::from)?, serde_json::to_string(&split_addresses(input.cc.as_deref().unwrap_or(""))).map_err(AppError::from)?, serde_json::to_string(&split_addresses(input.bcc.as_deref().unwrap_or(""))).map_err(AppError::from)?, input.subject, input.body_text, input.in_reply_to, serde_json::to_string(&input.references.clone().unwrap_or_default()).map_err(AppError::from)?, now]).map_err(AppError::from)?;
         Ok(id)
@@ -2277,7 +2377,7 @@ impl Database {
     pub fn delete_draft(&mut self, draft_id: &str) -> Result<(), AppError> {
         let deleted = self
             .connection
-            .execute("DELETE FROM drafts WHERE id=?", [draft_id])
+            .execute("DELETE FROM drafts WHERE id=? AND NOT EXISTS (SELECT 1 FROM outbox WHERE draft_id=drafts.id)", [draft_id])
             .map_err(AppError::from)?;
         if deleted == 0 {
             Err(AppError::not_found("draft"))
@@ -2349,6 +2449,9 @@ impl Database {
     pub fn get_settings(&self) -> Result<serde_json::Value, AppError> {
         let mut settings = serde_json::Map::from_iter([
             ("theme".into(), json!("system")),
+            ("colorScheme".into(), json!("matcha")),
+            ("customThemeSeed".into(), json!("#3F6654")),
+            ("androidDynamicColor".into(), json!(false)),
             ("safeReading".into(), json!(true)),
             ("syncPolicy".into(), json!("automatic")),
         ]);
@@ -2377,7 +2480,14 @@ impl Database {
         let object = patch
             .as_object()
             .ok_or_else(|| AppError::InvalidConfiguration("设置更新必须是 JSON 对象".into()))?;
-        let allowed = ["theme", "safeReading", "syncPolicy"];
+        let allowed = [
+            "theme",
+            "colorScheme",
+            "customThemeSeed",
+            "androidDynamicColor",
+            "safeReading",
+            "syncPolicy",
+        ];
         let now = Utc::now().to_rfc3339();
         let tx = self.connection.transaction().map_err(AppError::from)?;
         for (key, value) in object {
@@ -2398,6 +2508,31 @@ impl Database {
                 "safeReading" if !value.is_boolean() => {
                     return Err(AppError::InvalidConfiguration(
                         "safeReading 必须是布尔值".into(),
+                    ));
+                }
+                "colorScheme"
+                    if !matches!(
+                        value.as_str(),
+                        Some("matcha")
+                            | Some("mutsumi")
+                            | Some("lavender")
+                            | Some("ocean")
+                            | Some("sunset")
+                            | Some("custom")
+                    ) =>
+                {
+                    return Err(AppError::InvalidConfiguration(
+                        "colorScheme 不是受支持的配色方案".into(),
+                    ));
+                }
+                "customThemeSeed" if !value.as_str().is_some_and(is_valid_hex_color) => {
+                    return Err(AppError::InvalidConfiguration(
+                        "customThemeSeed 必须是 #RRGGBB 颜色".into(),
+                    ));
+                }
+                "androidDynamicColor" if !value.is_boolean() => {
+                    return Err(AppError::InvalidConfiguration(
+                        "androidDynamicColor 必须是布尔值".into(),
                     ));
                 }
                 "syncPolicy"
@@ -2608,11 +2743,7 @@ fn mark_pending_operation_conflicted(
             operation_type.as_str(),
             "move" | "trash" | "permanent_delete"
         ) {
-            tx.execute(
-                "UPDATE message_instances SET is_deleted=0 WHERE id=?",
-                [instance_id],
-            )
-            .map_err(AppError::from)?;
+            restore_message_instance(&tx, &instance_id)?;
         }
     }
     Ok(())
@@ -2666,6 +2797,7 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         is_starred,
         has_attachment: row.get::<_, i64>(13)? != 0,
         attachment_count: row.get(14)?,
+        attachments: Vec::new(),
         labels: serde_json::from_str(&labels_json).unwrap_or_default(),
         size_bytes: row.get(15)?,
         from: Address {
@@ -2674,6 +2806,27 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         },
         to: serde_json::from_str(&to_json).unwrap_or_default(),
     })
+}
+
+fn sanitize_attachment_filename(value: &str, position: usize) -> String {
+    let name = value.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    let sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(character, ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        format!("attachment-{}", position + 1)
+    } else {
+        sanitized
+    }
 }
 
 fn build_fts_query(query: &str) -> String {
@@ -2725,6 +2878,44 @@ fn update_flag(flags: &mut Vec<String>, flag: &str, value: Option<bool>) {
         }
     }
 }
+
+fn is_valid_hex_color(value: &str) -> bool {
+    value.len() == 7
+        && value.starts_with('#')
+        && value.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+}
+fn restore_message_instance(tx: &rusqlite::Transaction<'_>, instance_id: &str) -> Result<(), AppError> {
+    tx.execute(
+        r#"UPDATE mailboxes SET total_count=total_count+1,
+        unread_count=unread_count+(SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(mi.flags_json) WHERE lower(value)='\seen') THEN 0 ELSE 1 END FROM message_instances mi WHERE mi.id=?)
+        WHERE id=(SELECT mailbox_id FROM message_instances WHERE id=? AND is_deleted=1)"#,
+        params![instance_id, instance_id],
+    ).map_err(AppError::from)?;
+    tx.execute("UPDATE message_instances SET is_deleted=0 WHERE id=?", [instance_id]).map_err(AppError::from)?;
+    tx.execute(
+        r#"UPDATE threads SET unread_count=(SELECT count(DISTINCT m.id) FROM messages m JOIN message_instances mi ON mi.message_id=m.id WHERE m.thread_id=threads.id AND mi.is_deleted=0 AND NOT EXISTS(SELECT 1 FROM json_each(mi.flags_json) WHERE lower(value)='\seen')) WHERE id=(SELECT m.thread_id FROM messages m JOIN message_instances mi ON mi.message_id=m.id WHERE mi.id=?)"#,
+        [instance_id],
+    ).map_err(AppError::from)?;
+    Ok(())
+}
+
+fn hide_message_instance(
+    tx: &rusqlite::Transaction<'_>, instance_id: &str, mailbox_id: &str,
+    message_id: &str, now: &str,
+) -> Result<(), AppError> {
+    tx.execute(
+        r#"UPDATE mailboxes SET total_count=MAX(0,total_count-1),
+        unread_count=MAX(0,unread_count-(SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(mi.flags_json) WHERE lower(value)='\seen') THEN 0 ELSE 1 END FROM message_instances mi WHERE mi.id=?)) WHERE id=?"#,
+        params![instance_id, mailbox_id],
+    ).map_err(AppError::from)?;
+    tx.execute("UPDATE message_instances SET is_deleted=1,last_synced_at=? WHERE id=?", params![now, instance_id]).map_err(AppError::from)?;
+    tx.execute(
+        r#"UPDATE threads SET unread_count=(SELECT count(DISTINCT m.id) FROM messages m JOIN message_instances mi ON mi.message_id=m.id WHERE m.thread_id=threads.id AND mi.is_deleted=0 AND NOT EXISTS(SELECT 1 FROM json_each(mi.flags_json) WHERE lower(value)='\seen')) WHERE id=(SELECT thread_id FROM messages WHERE id=?)"#,
+        [message_id],
+    ).map_err(AppError::from)?;
+    Ok(())
+}
+
 fn split_addresses(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -2743,8 +2934,10 @@ mod tests {
     use crate::backends::incoming::IncomingMailboxIndex;
     use crate::domain::account::CreateAccountInput;
     use crate::domain::{Address, DraftInput};
+    use crate::mime::parser::ParsedAttachment;
     use crate::providers::registry::provider_presets;
     use rusqlite::params;
+    use serde_json::json;
 
     fn snapshot_metadata(
         uid_validity: Option<u32>,
@@ -2984,6 +3177,17 @@ mod tests {
                 .len(),
             1
         );
+        let refs = vec![(String::from("msg-fts"), String::from("mb-fts"))];
+        assert!(database.delete_messages(&refs, false).is_err());
+        assert_eq!(database.list_messages(Some("mb-fts"), 20).unwrap().len(), 1);
+        database.connection.execute(
+            "INSERT INTO mailboxes (id,account_id,remote_id,name,display_name,special_role) VALUES ('mb-trash',?,'Trash','Trash','回收站','trash')",
+            [account.id.as_str()],
+        ).unwrap();
+        let invalid_batch = vec![refs[0].clone(), ("missing".into(), "mb-fts".into())];
+        assert!(database.delete_messages(&invalid_batch, false).is_err());
+        assert_eq!(database.list_messages(Some("mb-fts"), 20).unwrap().len(), 1);
+        database.connection.execute("UPDATE mailboxes SET total_count=1,unread_count=0 WHERE id='mb-fts'", []).unwrap();
         assert_eq!(
             database
                 .delete_messages(&[(String::from("msg-fts"), String::from("mb-fts"))], false,)
@@ -2994,6 +3198,8 @@ mod tests {
             .list_messages(Some("mb-fts"), 20)
             .expect("deleted list")
             .is_empty());
+        let remaining: (i64, i64) = database.connection.query_row("SELECT total_count,unread_count FROM mailboxes WHERE id='mb-fts'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(remaining, (0, 0));
         let claimed = database
             .claim_pending_imap_operations(&account.id, 10)
             .expect("claim trash");
@@ -3858,7 +4064,7 @@ mod tests {
         database
             .connection
             .execute(
-                "INSERT INTO mailboxes (id,account_id,remote_id,name,display_name,special_role) VALUES ('owner-inbox',?,'INBOX','INBOX','INBOX','inbox')",
+                "INSERT INTO mailboxes (id,account_id,remote_id,name,display_name,special_role,unread_count,total_count) VALUES ('owner-inbox',?,'INBOX','INBOX','INBOX','inbox',1,1)",
                 [account.id.as_str()],
             )
             .expect("mailbox");
@@ -3889,6 +4095,29 @@ mod tests {
             .expect("mutate");
         assert!(message.is_read);
         assert_eq!(message.mailbox_id, "owner-inbox");
+        assert_eq!(
+            database
+                .list_mailboxes(&account.id)
+                .expect("mailboxes after mark read")
+                .into_iter()
+                .find(|mailbox| mailbox.id == "owner-inbox")
+                .expect("inbox")
+                .unread_count,
+            0
+        );
+        database
+            .mutate_message("owner-message", "owner-inbox", Some(true), None)
+            .expect("repeated mark read");
+        assert_eq!(
+            database
+                .list_mailboxes(&account.id)
+                .expect("mailboxes after repeated mutation")
+                .into_iter()
+                .find(|mailbox| mailbox.id == "owner-inbox")
+                .expect("inbox")
+                .unread_count,
+            0
+        );
         let archive_flags: String = database
             .connection
             .query_row(
@@ -3913,6 +4142,35 @@ mod tests {
                 .expect("direct lookup")
                 .id,
             "owner-message"
+        );
+    }
+
+    #[test]
+    fn theme_settings_persist_md3_palette_and_reject_invalid_custom_seed() {
+        let mut database = Database::open_in_memory().expect("database");
+        let settings = database
+            .update_settings(&json!({
+                "theme": "system",
+                "colorScheme": "custom",
+                "customThemeSeed": "#123ABC",
+                "androidDynamicColor": true
+            }))
+            .expect("valid theme settings");
+        assert_eq!(settings["colorScheme"], "custom");
+        assert_eq!(settings["customThemeSeed"], "#123ABC");
+        assert_eq!(settings["androidDynamicColor"], true);
+
+        let settings = database
+            .update_settings(&json!({ "colorScheme": "mutsumi" }))
+            .expect("Mutsumi theme setting");
+        assert_eq!(settings["colorScheme"], "mutsumi");
+
+        assert!(database
+            .update_settings(&json!({ "customThemeSeed": "not-a-color" }))
+            .is_err());
+        assert_eq!(
+            database.get_settings().expect("settings after rejection")["customThemeSeed"],
+            "#123ABC"
         );
     }
 
@@ -4011,6 +4269,14 @@ mod tests {
             .expect("marked messages")
             .iter()
             .all(|message| message.is_read));
+        assert_eq!(
+            database
+                .list_mailboxes(&account.id)
+                .expect("mailboxes after batch mark read")
+                .remove(0)
+                .unread_count,
+            0
+        );
         let pending_count: i64 = database
             .connection
             .query_row(
@@ -4033,6 +4299,14 @@ mod tests {
             .expect("rolled back messages")
             .iter()
             .all(|message| message.is_read));
+        assert_eq!(
+            database
+                .list_mailboxes(&account.id)
+                .expect("mailboxes after rollback")
+                .remove(0)
+                .unread_count,
+            0
+        );
         let pending_count_after_error: i64 = database
             .connection
             .query_row(
@@ -4205,6 +4479,9 @@ mod tests {
             )
             .expect("immutable draft id");
         assert_ne!(immutable_id, editable_id);
+        input.id = Some(immutable_id.clone());
+        assert!(database.save_draft(&input).is_err(), "queue snapshot must be immutable");
+        assert!(database.delete_draft(&immutable_id).is_err(), "queue snapshot must survive draft deletion");
         let snapshot = database.outbox_draft(&outbox_id).expect("outbox draft");
         assert_eq!(snapshot.subject, "Move draft");
         assert_eq!(snapshot.body_text, "Immutable body");
@@ -4846,12 +5123,23 @@ mod tests {
                     body_text: Some("Hydrated body".into()),
                     body_html_text: None,
                     has_attachment: true,
+                    attachments: vec![ParsedAttachment {
+                        filename: "notes.txt".into(),
+                        content_type: "text/plain".into(),
+                        bytes: b"download me".to_vec(),
+                    }],
                 },
             )
             .expect("hydrate body");
         assert_eq!(hydrated.body_text.as_deref(), Some("Hydrated body"));
         assert_eq!(hydrated.preview, "Hydrated preview");
         assert!(hydrated.has_attachment);
+        assert_eq!(hydrated.attachments.len(), 1);
+        let (attachment, bytes) = database
+            .attachment_payload(&hydrated.attachments[0].id)
+            .expect("cached attachment payload");
+        assert_eq!(attachment.filename, "notes.txt");
+        assert_eq!(bytes, b"download me");
         assert_eq!(
             database
                 .imap_sync_cursor(&account.id, "INBOX")
@@ -4880,6 +5168,7 @@ mod tests {
                     body_text: Some("must not persist after clear".into()),
                     body_html_text: None,
                     has_attachment: false,
+                    attachments: Vec::new(),
                 },
             )
             .expect_err("cache clear must reject an in-flight body response");
@@ -4903,6 +5192,7 @@ mod tests {
                     body_text: Some("must not persist".into()),
                     body_html_text: None,
                     has_attachment: false,
+                    attachments: Vec::new(),
                 },
             )
             .expect_err("stale locator must be rejected");

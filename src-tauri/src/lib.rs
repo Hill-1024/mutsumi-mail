@@ -5,6 +5,7 @@ mod auth;
 mod backends;
 mod commands;
 mod domain;
+mod dynamic_color;
 mod errors;
 mod mime;
 mod providers;
@@ -23,7 +24,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init());
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(all_files_access::init());
+    let builder = builder
+        .plugin(all_files_access::init())
+        .plugin(dynamic_color::init());
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(
         |app, _arguments, _working_directory| {

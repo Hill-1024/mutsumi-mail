@@ -1,4 +1,5 @@
 export type ThemeMode = 'dark' | 'light' | 'system';
+export type ThemePaletteId = 'matcha' | 'mutsumi' | 'lavender' | 'ocean' | 'sunset' | 'custom';
 
 export type ProviderId = 'qq' | 'netease-163' | 'generic' | 'generic-smtp' | 'cloudflare-smtp';
 
@@ -91,8 +92,16 @@ export interface Message {
   isStarred: boolean;
   hasAttachment: boolean;
   attachmentCount?: number;
+  attachments?: AttachmentInfo[];
   labels: string[];
   sizeBytes?: number;
+}
+
+export interface AttachmentInfo {
+  id: string;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
 }
 
 export interface SyncStatus {

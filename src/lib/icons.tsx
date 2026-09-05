@@ -14,6 +14,7 @@ import deleteRounded from '@iconify-icons/material-symbols/delete-rounded';
 import desktopWindowsOutlineRounded from '@iconify-icons/material-symbols/desktop-windows-outline-rounded';
 import draftOutlineRounded from '@iconify-icons/material-symbols/draft-outline-rounded';
 import draftRounded from '@iconify-icons/material-symbols/draft-rounded';
+import downloadRounded from '@iconify-icons/material-symbols/download-rounded';
 import editOutlineRounded from '@iconify-icons/material-symbols/edit-outline-rounded';
 import folderOutlineRounded from '@iconify-icons/material-symbols/folder-outline-rounded';
 import folderRounded from '@iconify-icons/material-symbols/folder-rounded';
@@ -67,6 +68,7 @@ export type IconName =
   | 'replyAll'
   | 'forward'
   | 'paperclip'
+  | 'download'
   | 'check'
   | 'shield'
   | 'sun'
@@ -111,6 +113,7 @@ const icons = {
   replyAll: replyAllRounded,
   forward: forwardRounded,
   paperclip: attachFileRounded,
+  download: downloadRounded,
   check: checkRounded,
   shield: shieldOutlineRounded,
   sun: lightModeOutlineRounded,

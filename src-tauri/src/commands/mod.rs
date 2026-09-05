@@ -683,10 +683,20 @@ pub fn cancel_outbox_item(
 
 #[tauri::command]
 pub fn download_attachment(
-    _state: State<'_, AppState>,
-    _attachment_id: String,
+    state: State<'_, AppState>,
+    attachment_id: String,
 ) -> Result<serde_json::Value, AppErrorDto> {
-    Err(unsupported("download_attachment"))
+    let (attachment, bytes) = state
+        .database
+        .lock()
+        .map_err(|_| {
+            AppErrorDto::from(crate::errors::AppError::Internal(
+                "database lock poisoned".into(),
+            ))
+        })?
+        .attachment_payload(&attachment_id)
+        .map_err(AppErrorDto::from)?;
+    Ok(serde_json::json!({ "attachment": attachment, "bytes": bytes }))
 }
 
 #[tauri::command]

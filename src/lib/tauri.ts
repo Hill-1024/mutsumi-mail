@@ -10,10 +10,27 @@ import type {
   ProviderId,
   ProviderPreset,
   SyncStatus,
+  ThemePaletteId,
 } from '../types';
 
 export const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-const defaultSettings = { theme: 'system' as const, safeReading: true, syncPolicy: 'automatic' };
+export interface AppSettings {
+  theme: 'system' | 'light' | 'dark';
+  colorScheme: ThemePaletteId;
+  customThemeSeed: string;
+  androidDynamicColor: boolean;
+  safeReading: boolean;
+  syncPolicy: string;
+}
+
+const defaultSettings: AppSettings = {
+  theme: 'system',
+  colorScheme: 'matcha',
+  customThemeSeed: '#3F6654',
+  androidDynamicColor: false,
+  safeReading: true,
+  syncPolicy: 'automatic',
+};
 
 const browserFallback = <T>(value: T): Promise<T> => Promise.resolve(value);
 
@@ -103,6 +120,13 @@ export async function fetchMessageBody(message: MessageInstanceRef): Promise<Mes
   return call<Message>('fetch_message_body', { ...message });
 }
 
+export async function downloadAttachment(attachmentId: string): Promise<{
+  attachment: import('../types').AttachmentInfo;
+  bytes: number[];
+}> {
+  return call('download_attachment', { attachmentId });
+}
+
 export async function saveDraft(input: DraftInput): Promise<{ id: string; savedAt: string }> {
   return call('save_draft', { input });
 }
@@ -142,26 +166,12 @@ export async function deleteDraft(draftId: string): Promise<{ draftId: string; d
   return call('delete_draft', { draftId });
 }
 
-export async function getSettings(): Promise<{
-  theme: 'system' | 'light' | 'dark';
-  safeReading: boolean;
-  syncPolicy: string;
-}> {
-  return call<{ theme: 'system' | 'light' | 'dark'; safeReading: boolean; syncPolicy: string }>(
-    'get_settings',
-    undefined,
-    defaultSettings,
-  );
+export async function getSettings(): Promise<AppSettings> {
+  return call<AppSettings>('get_settings', undefined, defaultSettings);
 }
 
-export async function updateSettings(
-  settings: Record<string, unknown>,
-): Promise<{ theme: string; safeReading: boolean; syncPolicy: string }> {
-  return call('update_settings', { settings }, { ...defaultSettings, ...settings } as {
-    theme: string;
-    safeReading: boolean;
-    syncPolicy: string;
-  });
+export async function updateSettings(settings: Record<string, unknown>): Promise<AppSettings> {
+  return call('update_settings', { settings }, { ...defaultSettings, ...settings } as AppSettings);
 }
 
 export async function clearCache(): Promise<{ deletedMessages: number }> {

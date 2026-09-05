@@ -10,6 +10,8 @@ import {
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import type { Account, Mailbox } from '../types';
 import { Icon, type IconName } from '../lib/icons';
+import { applyThemeTokens, getAndroidDynamicColor, paletteSeed } from '../lib/theme';
+import { installContextMenuGuard } from '../lib/context-menu';
 import { useUiStore } from '../stores/ui';
 
 interface AppShellProps {
@@ -143,6 +145,19 @@ function AccountMenu({
   );
 }
 
+const mutsumiGreeting = (date: Date) => {
+  const hour = date.getHours();
+  if (hour < 5) return '夜深了。';
+  if (hour < 11) return '早上好。';
+  if (hour < 13) return '中午好。';
+  if (hour < 18) return '下午好。';
+  if (hour < 23) return '晚上好。';
+  return '夜深了。';
+};
+
+const mutsumiDateLabel = (date: Date) =>
+  date.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
+
 export function AppShell({
   accounts,
   selectedAccountId,
@@ -155,9 +170,17 @@ export function AppShell({
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const dynamicColorRequested = useRef(false);
   const [accountMenuSurface, setAccountMenuSurface] = useState<'desktop' | 'mobile' | null>(null);
+
+  useEffect(() => installContextMenuGuard(), []);
   const {
     themeMode,
+    themePalette,
+    customThemeSeed,
+    androidDynamicColor,
+    androidDynamicSeed,
+    setAndroidDynamicSeed,
     setThemeMode,
     selectedMailboxId,
     selectedMessageId,
@@ -175,6 +198,8 @@ export function AppShell({
   const canCompose = accounts.some(
     (candidate) => candidate.enabled && candidate.outgoingConfigured,
   );
+  const mutsumiMode = !androidDynamicColor && themePalette === 'mutsumi';
+  const showMutsumiHero = mutsumiMode && navPage === 'mail' && !selectedMessageId;
   const inboxId = 'inbox';
   const scopeName = selectedAccount
     ? selectedAccount.displayName || selectedAccount.email
@@ -308,13 +333,28 @@ export function AppShell({
             : 'dark'
           : themeMode;
       document.documentElement.dataset.theme = resolved;
+      if (mutsumiMode) document.documentElement.dataset.specialTheme = 'mutsumi';
+      else delete document.documentElement.dataset.specialTheme;
+      const seed =
+        androidDynamicColor && androidDynamicSeed
+          ? androidDynamicSeed
+          : paletteSeed(themePalette, customThemeSeed);
+      applyThemeTokens(seed, resolved === 'dark');
     };
     applyTheme();
     if (themeMode !== 'system') return undefined;
     const media = window.matchMedia('(prefers-color-scheme: light)');
     media.addEventListener('change', applyTheme);
     return () => media.removeEventListener('change', applyTheme);
-  }, [themeMode]);
+  }, [androidDynamicColor, androidDynamicSeed, customThemeSeed, mutsumiMode, themeMode, themePalette]);
+
+  useEffect(() => {
+    if (!androidDynamicColor || androidDynamicSeed || dynamicColorRequested.current) return;
+    dynamicColorRequested.current = true;
+    void getAndroidDynamicColor()
+      .then((result) => setAndroidDynamicSeed(result.available ? (result.seedHex ?? null) : null))
+      .catch(() => setAndroidDynamicSeed(null));
+  }, [androidDynamicColor, androidDynamicSeed, setAndroidDynamicSeed]);
 
   useEffect(() => {
     if (!accountMenuSurface) return undefined;
@@ -474,9 +514,12 @@ export function AppShell({
     return currentMailbox?.displayName ?? '收件箱';
   }, [navPage, selectedAccount, selectedMailboxId, mailboxes]);
 
+  const now = new Date();
+
   return (
     <div
       className={`app-shell ${navPage === 'mail' && selectedMessageId ? 'is-reading-message' : ''}`}
+      data-special-theme={mutsumiMode ? 'mutsumi' : undefined}
     >
       <aside className="sidebar" aria-label="邮箱导航" inert={mobileMenuOpen ? true : undefined}>
         <button
@@ -682,6 +725,16 @@ export function AppShell({
             </button>
           </div>
         </header>
+        {showMutsumiHero ? (
+          <section className="mutsumi-hero" aria-label="今日问候">
+            <div className="mutsumi-hero-art" aria-hidden="true" />
+            <div className="mutsumi-hero-copy">
+              <p className="mutsumi-hero-greeting">{mutsumiGreeting(now)}</p>
+              <p className="mutsumi-hero-tagline">……嗯，今天也请多指教。</p>
+              <p className="mutsumi-hero-date">{mutsumiDateLabel(now)}</p>
+            </div>
+          </section>
+        ) : null}
         <div className="workspace-content">{children}</div>
       </main>
 

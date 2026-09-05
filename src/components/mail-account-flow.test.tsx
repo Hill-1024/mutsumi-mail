@@ -407,7 +407,7 @@ describe('邮箱账户关键流程', () => {
     );
   }, 15_000);
 
-  it('HTML 纯文本正文可阅读，回复保留原邮件线程与收件账户', () => {
+  it('安全渲染 HTML 正文、展示附件，并保留回复线程与收件账户', () => {
     const message: Message = {
       id: 'message-1',
       accountId: 'account-b',
@@ -420,16 +420,24 @@ describe('邮箱账户关键流程', () => {
       to: [{ email: 'second@163.com' }, { email: 'colleague@example.com' }],
       date: '2026-09-03T00:00:00Z',
       preview: '短预览',
-      bodyHtmlText: '完整安全文本正文',
+      bodyHtmlText: '<table><tbody><tr><td>完整 HTML 正文</td></tr></tbody></table><script>bad()</script>',
       isRead: true,
       isStarred: false,
-      hasAttachment: false,
+      hasAttachment: true,
+      attachmentCount: 1,
+      attachments: [
+        { id: 'attachment-1', filename: '报告.pdf', contentType: 'application/pdf', sizeBytes: 2048 },
+      ],
       labels: [],
     };
 
     render(<Reader message={message} accountEmail="second@163.com" />);
 
-    expect(screen.getByText('完整安全文本正文')).toBeTruthy();
+    expect(screen.getByText('完整 HTML 正文').closest('table')).not.toBeNull();
+    expect(document.querySelector('script')).toBeNull();
+    expect(screen.getByText('报告.pdf')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '查看' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /下载/ })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '回复' }));
     expect(useUiStore.getState().composeDraft).toEqual(
       expect.objectContaining({
@@ -444,9 +452,14 @@ describe('邮箱账户关键流程', () => {
   it('打开阅读器后把未读邮件持久化为已读，且不会重复提交', async () => {
     const unread = message();
     apiMocks.mutateMessage.mockResolvedValue({ ...unread, isRead: true });
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    client.setQueryData(['mailboxes', 'all'], []);
+    client.setQueryData(['messages', 'all', 'inbox', false], []);
 
     render(
-      withQueryClient(
+      <QueryClientProvider client={client}>
         <MemoryRouter>
           <MailHome
             hasAccounts
@@ -456,8 +469,9 @@ describe('邮箱账户关键流程', () => {
             isLoading={false}
             onOpenSettings={vi.fn()}
           />
-        </MemoryRouter>,
-      ),
+        </MemoryRouter>
+        ,
+      </QueryClientProvider>,
     );
 
     await waitFor(() =>
@@ -467,6 +481,10 @@ describe('邮箱账户关键流程', () => {
       ),
     );
     expect(apiMocks.mutateMessage).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(client.getQueryState(['mailboxes', 'all'])?.isInvalidated).toBe(true);
+      expect(client.getQueryState(['messages', 'all', 'inbox', false])?.isInvalidated).toBe(true);
+    });
   });
 
   it('邮件列表支持批量标记已读和移至回收站', async () => {
@@ -510,4 +528,49 @@ describe('邮箱账户关键流程', () => {
     await waitFor(() => expect(onBulkDelete).toHaveBeenCalledWith([first, second]));
     await waitFor(() => expect(screen.queryByText('2 已选')).toBeNull());
   });
+
+});
+
+it('发送入队后禁用重复发送，编辑中的关闭需明确丢弃', async () => {
+  const onClose = vi.fn();
+  apiMocks.sendDraft.mockResolvedValue({ outboxId: 'queued-once', state: 'queued' });
+  render(withQueryClient(<ComposeDialog accounts={[account()]} onClose={onClose} />));
+  fireEvent.change(screen.getByPlaceholderText('输入一个或多个邮箱地址'), { target: { value: 'a@example.com' } });
+  fireEvent.change(screen.getByPlaceholderText('邮件主题'), { target: { value: '只发送一次' } });
+  fireEvent.click(screen.getByRole('button', { name: '关闭撰写' }));
+  expect(onClose).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '继续编辑' }));
+  fireEvent.click(screen.getByRole('button', { name: '发送' }));
+  await screen.findByText('邮件已加入发件队列');
+  const send = screen.getByRole('button', { name: '发送' }) as HTMLButtonElement;
+  expect(send.disabled).toBe(true);
+  fireEvent.click(send);
+  expect(apiMocks.sendDraft).toHaveBeenCalledTimes(1);
+});
+
+it('自动保存未完成时发送等待同一草稿，避免重新创建已发送草稿', async () => {
+  let finishSave!: (value: { id: string }) => void;
+  apiMocks.saveDraft.mockImplementation(() => new Promise((resolve) => { finishSave = resolve; }));
+  apiMocks.sendDraft.mockResolvedValue({ outboxId: 'serialized', state: 'queued' });
+  render(withQueryClient(<ComposeDialog accounts={[account()]} onClose={vi.fn()} />));
+  fireEvent.change(screen.getByPlaceholderText('输入一个或多个邮箱地址'), { target: { value: 'a@example.com' } });
+  fireEvent.change(screen.getByPlaceholderText('邮件主题'), { target: { value: '等待保存' } });
+  await waitFor(() => expect(apiMocks.saveDraft).toHaveBeenCalledTimes(1), { timeout: 2500 });
+  const input = apiMocks.saveDraft.mock.calls[0][0];
+  fireEvent.click(screen.getByRole('button', { name: '发送' }));
+  await act(async () => { await Promise.resolve(); });
+  expect(apiMocks.sendDraft).not.toHaveBeenCalled();
+  await act(async () => finishSave({ id: input.id }));
+  await waitFor(() => expect(apiMocks.sendDraft).toHaveBeenCalledWith(expect.objectContaining({ id: input.id })));
+});
+
+it('正文下载完成不能覆盖后来同步的新星标状态', async () => {
+  const original = message({ isRead: true, bodyText: undefined });
+  apiMocks.fetchMessageBody.mockResolvedValue({ ...original, bodyText: '已下载正文' });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = (item: Message) => <QueryClientProvider client={client}><MemoryRouter><MailHome hasAccounts accounts={[account()]} messages={[item]} mailboxes={[]} isLoading={false} onOpenSettings={vi.fn()} /></MemoryRouter></QueryClientProvider>;
+  const { rerender } = render(view(original));
+  await screen.findByText('已下载正文');
+  rerender(view({ ...original, isStarred: true }));
+  expect(within(screen.getByRole('article')).getByRole('button', { name: '取消星标' })).toBeTruthy();
 });

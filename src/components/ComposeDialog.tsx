@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { useQueryClient } from '@tanstack/react-query';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { useDialogFocus } from '../lib/use-dialog-focus';
 import { Icon } from '../lib/icons';
 import {
   appErrorMessage,
@@ -84,8 +85,13 @@ export function ComposeDialog({
     ? (preferredAccountId ?? '')
     : (sendAccounts[0]?.id ?? '');
   const [accountId, setAccountId] = useState(initialAccountId);
-  const [draftId, setDraftId] = useState<string>();
-  const [status, setStatus] = useState<'idle' | 'saving' | 'queued' | 'error'>('idle');
+  const [draftId, setDraftId] = useState<string>(() => crypto.randomUUID());
+  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'queued' | 'error'>('idle');
+  const dialogRef = useDialogFocus<HTMLElement>();
+  const saving = useRef<Promise<unknown>>(Promise.resolve());
+  const submitting = useRef(false);
+  const closeTimer = useRef<number | undefined>(undefined);
+  const [confirmClose, setConfirmClose] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [showCcBcc, setShowCcBcc] = useState(Boolean(composeDraft?.cc || composeDraft?.bcc));
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
@@ -115,22 +121,25 @@ export function ComposeDialog({
   // Handle escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        clearComposeDraft();
-        onClose();
+      if (e.key === 'Escape' && !submitting.current && status !== 'queued') {
+        e.preventDefault();
+        if (isDirty || attachments.length || composeDraft) setConfirmClose(true);
+        else onClose();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [clearComposeDraft, onClose]);
+  }, [attachments.length, composeDraft, isDirty, onClose, status]);
+
+  useEffect(() => () => window.clearTimeout(closeTimer.current), []);
 
   // Auto-save draft
   useEffect(() => {
-    if (status !== 'idle') return undefined;
+    if (status === 'saving' || status === 'queued') return undefined;
     const timer = window.setTimeout(() => {
       if (isDirty && selectedSenderId) {
         if (watchedValues.bodyText || watchedValues.subject) {
-          void saveDraft({
+          const input = {
             id: draftId,
             to: watchedValues.to ?? '',
             cc: watchedValues.cc,
@@ -140,9 +149,11 @@ export function ComposeDialog({
             accountId: selectedSenderId,
             inReplyTo: composeDraft?.inReplyTo,
             references: composeDraft?.references,
-          })
-            .then((saved) => setDraftId((current) => current ?? saved.id))
-            .catch(() => undefined);
+          };
+          saving.current = saving.current.catch(() => undefined).then(() => saveDraft(input));
+          void saving.current.catch(() => {
+            setStatusMessage('自动保存失败，请手动保存草稿。');
+          });
         }
       }
     }, 1200);
@@ -162,6 +173,7 @@ export function ComposeDialog({
   ]);
 
   const submit = async (mode: 'save' | 'send', formData?: ComposeForm) => {
+    if (submitting.current || status === 'queued' || selectingAttachments) return;
     if (!selectedSenderId) {
       setStatus('error');
       setStatusMessage('没有可用的发件账户，请先在设置中完成发件配置。');
@@ -169,9 +181,11 @@ export function ComposeDialog({
     }
 
     const values = formData ?? getValues();
+    submitting.current = true;
     setStatus('saving');
     setStatusMessage('');
     try {
+      await saving.current.catch(() => undefined);
       if (mode === 'save') {
         const saved = await saveDraft({
           id: draftId,
@@ -186,8 +200,8 @@ export function ComposeDialog({
         });
         setDraftId(saved.id);
         await queryClient.invalidateQueries({ queryKey: ['outbox'] });
-        setStatusMessage('草稿已保存在本地');
-        setStatus('queued');
+        setStatusMessage(attachments.length ? '邮件文字已保存；附件仅保留在当前窗口，请发送后再关闭。' : '草稿已保存在本地');
+        setStatus('saved');
       } else {
         const input = {
           id: draftId,
@@ -224,7 +238,7 @@ export function ComposeDialog({
         setStatus('queued');
 
         // Smooth auto-close after 1 second
-        window.setTimeout(() => {
+        closeTimer.current = window.setTimeout(() => {
           clearComposeDraft();
           onClose();
         }, 900);
@@ -232,6 +246,8 @@ export function ComposeDialog({
     } catch (error) {
       setStatus('error');
       setStatusMessage(appErrorMessage(error));
+    } finally {
+      submitting.current = false;
     }
   };
 
@@ -290,8 +306,9 @@ export function ComposeDialog({
   };
 
   const handleScrimClose = () => {
-    clearComposeDraft();
-    onClose();
+    if (submitting.current || status === 'queued') return;
+    if (isDirty || attachments.length || composeDraft) setConfirmClose(true);
+    else onClose();
   };
 
   return (
@@ -303,6 +320,7 @@ export function ComposeDialog({
       }}
     >
       <section
+        ref={dialogRef}
         className="compose-dialog"
         role="dialog"
         aria-modal="true"
@@ -320,7 +338,17 @@ export function ComposeDialog({
           </button>
         </header>
 
-        <form onSubmit={handleSubmit((data) => submit('send', data))}>
+        {confirmClose && (
+          <div className="compose-close-confirm" role="alert">
+            <p>关闭撰写？未保存的修改和附件将被丢弃。</p>
+            <div>
+              <button type="button" className="text-action" onClick={() => setConfirmClose(false)}>继续编辑</button>
+              <button type="button" className="text-action" onClick={() => { clearComposeDraft(); onClose(); }}>丢弃并关闭</button>
+            </div>
+          </div>
+        )}
+        <form onChange={() => { if (status === 'saved' || status === 'error') { setStatus('idle'); setStatusMessage(''); } }} onSubmit={(event) => { void handleSubmit((data) => submit('send', data))(event); }}>
+          <fieldset disabled={status === 'saving' || status === 'queued'} className="compose-fields">
           <label className="field-row compose-account-field">
             <span className="field-label">发件账户</span>
             <select
@@ -329,7 +357,7 @@ export function ComposeDialog({
               disabled={sendAccounts.length === 0 || status === 'saving'}
               onChange={(event) => {
                 setAccountId(event.target.value);
-                setDraftId(undefined);
+                setDraftId(crypto.randomUUID());
                 setStatus('idle');
                 setStatusMessage('');
               }}
@@ -389,6 +417,7 @@ export function ComposeDialog({
 
           <textarea
             className="compose-body"
+            aria-label="邮件正文"
             {...register('bodyText')}
             placeholder="写下你的邮件内容…"
             rows={10}
@@ -416,7 +445,7 @@ export function ComposeDialog({
             </ul>
           ) : null}
 
-          {status !== 'idle' && (
+          {(status !== 'idle' || statusMessage) && (
             <div
               className={`compose-status ${status === 'error' ? 'is-error' : ''}`}
               role={status === 'error' ? 'alert' : 'status'}
@@ -443,7 +472,7 @@ export function ComposeDialog({
               type="button"
               className="text-action"
               onClick={() => void submit('save')}
-              disabled={!selectedSenderId || status === 'saving'}
+              disabled={!selectedSenderId || selectingAttachments || status === 'saving' || status === 'queued'}
               title="保存为草稿"
             >
               保存草稿
@@ -451,13 +480,14 @@ export function ComposeDialog({
             <button
               className="send-action"
               type="submit"
-              disabled={!selectedSenderId || status === 'saving'}
+              disabled={!selectedSenderId || selectingAttachments || status === 'saving' || status === 'queued'}
               title="发送邮件"
             >
               <Icon name="send" size={18} />
               <span>发送</span>
             </button>
           </div>
+          </fieldset>
         </form>
       </section>
     </div>

@@ -87,7 +87,10 @@ where
             .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
         let locator = database.imap_body_locator(&message_id, &mailbox_id)?;
         if locator.body_cached {
-            return database.get_message_in_mailbox(&message_id, &mailbox_id);
+            let mut message = database.get_message_in_mailbox(&message_id, &mailbox_id)?;
+            message.attachments = database.list_attachments(&message_id)?;
+            message.attachment_count = message.attachments.len() as i64;
+            return Ok(message);
         }
         if !locator.account_enabled {
             return Err(AppError::Capability(
@@ -135,6 +138,7 @@ where
         body_text: parsed.text,
         body_html_text: parsed.html_text,
         has_attachment: parsed.attachment_count > 0,
+        attachments: parsed.attachments,
     };
 
     state
@@ -341,7 +345,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetches_sanitizes_and_caches_body_without_holding_database_lock() {
+    async fn fetches_html_and_caches_body_without_holding_database_lock() {
         let (state, message_id, mailbox_id) = metadata_only_state();
         let raw = b"From: sender@example.com\r\nSubject: Lazy body\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hello</p><script>doBadThing()</script>".to_vec();
         let fetched = fetch_message_body_with(
@@ -374,12 +378,10 @@ mod tests {
         .await
         .expect("hydrated message");
         assert_eq!(fetched.mailbox_id, mailbox_id);
-        assert_eq!(fetched.body_html_text.as_deref(), Some("Hello"));
-        assert!(!fetched
-            .body_html_text
-            .as_deref()
-            .unwrap_or_default()
-            .contains("doBadThing"));
+        assert_eq!(
+            fetched.body_html_text.as_deref(),
+            Some("<p>Hello</p><script>doBadThing()</script>")
+        );
 
         let network_calls = Arc::new(AtomicUsize::new(0));
         let calls = Arc::clone(&network_calls);
@@ -396,7 +398,10 @@ mod tests {
         )
         .await
         .expect("cached message");
-        assert_eq!(cached.body_html_text.as_deref(), Some("Hello"));
+        assert_eq!(
+            cached.body_html_text.as_deref(),
+            Some("<p>Hello</p><script>doBadThing()</script>")
+        );
         assert_eq!(network_calls.load(Ordering::SeqCst), 0);
     }
 

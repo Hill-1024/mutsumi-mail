@@ -11,7 +11,7 @@ Mutsumi Mail 是一个 Rust + Tauri v2 + React/Vite 的离线优先桌面邮件�
 - Rust 后台同步 supervisor：自动收件账户保持一个 IMAP `IDLE` 监听，服务端事件才触发增量同步；不支持 `IDLE` 的旧服务器才使用桌面 30 分钟、移动端前台 60 分钟的低频兜底。认证或钥匙串失败会停止自动重试，等待用户主动重连。
 - SMTP 发送前校验、持久化发件队列、稳定 Message-ID 与不可变 MIME 快照；结果不确定时不会盲目重发。
 - SQLite migration：accounts、mailboxes、messages、instances、drafts、outbox、pending operations、sync cursors、FTS5。
-- 系统 keyring-backed `SecretStore` 抽象；SQLite 只保留 `secret_ref`，进程内串行读取并缓存凭据，收发使用同一授权码时只创建一个钥匙串项目。
+- 统一的 `SecretStore` 接口按平台接入原生安全存储：macOS Keychain、iOS Protected Data、Android Keystore 加密存储、Windows Credential Manager、Linux Secret Service。SQLite 只保留 `secret_ref`，不保存凭据明文；进程内串行读取并缓存，收发使用同一授权码时只创建一个凭据项目。
 - 桌面单实例保护；重复打开只聚焦已有窗口，不会启动第二套同步任务或重复请求钥匙串授权。
 - 本地虚拟化邮件列表、安全文本阅读、草稿自动保存、可恢复发件队列和覆盖发件人/收件人的 FTS5 搜索。
 

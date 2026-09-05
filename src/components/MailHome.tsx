@@ -57,7 +57,13 @@ export function MailHome({
         .filter((message) => !removedMessageKeys.has(messageInstanceKey(message)))
         .map((message) => ({
           ...message,
-          ...hydratedMessages[messageInstanceKey(message)],
+          ...(hydratedMessages[messageInstanceKey(message)] ? {
+            bodyText: hydratedMessages[messageInstanceKey(message)].bodyText,
+            bodyHtmlText: hydratedMessages[messageInstanceKey(message)].bodyHtmlText,
+            attachments: hydratedMessages[messageInstanceKey(message)].attachments,
+            attachmentCount: hydratedMessages[messageInstanceKey(message)].attachmentCount,
+            hasAttachment: hydratedMessages[messageInstanceKey(message)].hasAttachment,
+          } : {}),
           ...optimisticFlags[messageInstanceKey(message)],
         })),
     [hydratedMessages, messageInstanceKey, messages, optimisticFlags, removedMessageKeys],
@@ -97,6 +103,11 @@ export function MailHome({
       setOptimisticFlags((current) => ({ ...current, [key]: { ...current[key], ...mutation } }));
       try {
         await mutateMessage({ messageId, mailboxId: source.mailboxId }, mutation);
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['mailboxes'] }),
+          queryClient.invalidateQueries({ queryKey: ['messages'] }),
+          queryClient.invalidateQueries({ queryKey: ['search'] }),
+        ]);
       } catch (error) {
         setOptimisticFlags((current) => {
           const next = { ...current };
@@ -105,9 +116,11 @@ export function MailHome({
         });
         setSyncMessage(appErrorMessage(error));
         throw error;
+      } finally {
+        setOptimisticFlags((current) => { const next = { ...current }; delete next[key]; return next; });
       }
     },
-    [localMessages, messageInstanceKey, setSyncMessage],
+    [localMessages, messageInstanceKey, queryClient, setSyncMessage],
   );
 
   const applyBulkMutation = useCallback(
@@ -138,6 +151,11 @@ export function MailHome({
         if (result.mutated !== uniqueMessages.length) {
           throw new Error('部分邮件状态未能更新');
         }
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['mailboxes'] }),
+          queryClient.invalidateQueries({ queryKey: ['messages'] }),
+          queryClient.invalidateQueries({ queryKey: ['search'] }),
+        ]);
       } catch (error) {
         setOptimisticFlags((current) => {
           const next = { ...current };
@@ -146,9 +164,11 @@ export function MailHome({
         });
         setSyncMessage(appErrorMessage(error));
         throw error;
+      } finally {
+        setOptimisticFlags((current) => { const next = { ...current }; for (const key of keys) delete next[key]; return next; });
       }
     },
-    [messageInstanceKey, setSyncMessage],
+    [messageInstanceKey, queryClient, setSyncMessage],
   );
 
   const getNextMessageId = (currentId: string) => {
@@ -168,11 +188,13 @@ export function MailHome({
     }
     const nextId = getNextMessageId(messageId);
     void moveMessages([{ messageId, mailboxId: source.mailboxId }], target.id)
-      .then(() => {
+      .then(async () => {
         setRemovedMessageKeys((current) => new Set(current).add(messageInstanceKey(source)));
         selectMessage(nextId);
-        void queryClient.invalidateQueries({ queryKey: ['messages'] });
+        await queryClient.invalidateQueries({ queryKey: ['messages'] });
         void queryClient.invalidateQueries({ queryKey: ['mailboxes'] });
+        void queryClient.invalidateQueries({ queryKey: ['search'] });
+        setRemovedMessageKeys((current) => { const next = new Set(current); next.delete(messageInstanceKey(source)); return next; });
       })
       .catch((error) => setSyncMessage(appErrorMessage(error)));
   };
@@ -205,8 +227,10 @@ export function MailHome({
         ) {
           selectMessage(null);
         }
-        void queryClient.invalidateQueries({ queryKey: ['messages'] });
+        await queryClient.invalidateQueries({ queryKey: ['messages'] });
         void queryClient.invalidateQueries({ queryKey: ['mailboxes'] });
+        void queryClient.invalidateQueries({ queryKey: ['search'] });
+        setRemovedMessageKeys((current) => { const next = new Set(current); for (const message of uniqueMessages) next.delete(messageInstanceKey(message)); return next; });
       } catch (error) {
         setSyncMessage(appErrorMessage(error));
         throw error;
@@ -311,6 +335,7 @@ export function MailHome({
       <section className="reader-pane" aria-label="邮件阅读器">
         {selectedMessage ? (
           <Reader
+            key={messageInstanceKey(selectedMessage)}
             message={selectedMessage}
             accountEmail={
               accounts.find((account) => account.id === selectedMessage.accountId)?.email
@@ -319,7 +344,7 @@ export function MailHome({
             bodyError={bodyErrors[messageInstanceKey(selectedMessage)]}
             onRetryBody={() => hydrateBody(selectedMessage)}
             onBack={() => selectMessage(null)}
-            onMutate={applyMutation}
+            onMutate={(id, mutation) => { void applyMutation(id, mutation).catch(() => undefined); }}
             onArchive={archiveMessage}
             onDelete={deleteMessage}
           />

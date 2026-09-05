@@ -1,7 +1,10 @@
 import { create } from 'zustand';
-import type { ThemeMode } from '../types';
+import type { ThemeMode, ThemePaletteId } from '../types';
 
 const THEME_STORAGE_KEY = 'mutsumi_theme_mode';
+const THEME_PALETTE_STORAGE_KEY = 'mutsumi_theme_palette';
+const THEME_CUSTOM_SEED_STORAGE_KEY = 'mutsumi_theme_custom_seed';
+const THEME_DYNAMIC_STORAGE_KEY = 'mutsumi_theme_android_dynamic';
 
 const getInitialTheme = (): ThemeMode => {
   if (typeof window === 'undefined') return 'dark';
@@ -23,6 +26,10 @@ export interface ComposeDraftState {
 
 interface UiState {
   themeMode: ThemeMode;
+  themePalette: ThemePaletteId;
+  customThemeSeed: string;
+  androidDynamicColor: boolean;
+  androidDynamicSeed: string | null;
   safeReading: boolean;
   selectedMailboxId: string;
   selectedMessageId: string | null;
@@ -32,6 +39,10 @@ interface UiState {
   navPage: 'mail' | 'search' | 'outbox' | 'settings';
   syncMessage: string | null;
   setThemeMode: (themeMode: ThemeMode) => void;
+  setThemePalette: (themePalette: ThemePaletteId) => void;
+  setCustomThemeSeed: (customThemeSeed: string) => void;
+  setAndroidDynamicColor: (androidDynamicColor: boolean) => void;
+  setAndroidDynamicSeed: (androidDynamicSeed: string | null) => void;
   toggleSafeReading: () => void;
   setSafeReading: (value: boolean) => void;
   selectMailbox: (id: string) => void;
@@ -46,6 +57,17 @@ interface UiState {
 
 export const useUiStore = create<UiState>((set) => ({
   themeMode: getInitialTheme(),
+  themePalette:
+    (typeof window !== 'undefined'
+      ? (window.localStorage.getItem(THEME_PALETTE_STORAGE_KEY) as ThemePaletteId | null)
+      : null) ?? 'matcha',
+  customThemeSeed:
+    (typeof window !== 'undefined' && window.localStorage.getItem(THEME_CUSTOM_SEED_STORAGE_KEY)) ||
+    '#3F6654',
+  androidDynamicColor:
+    typeof window !== 'undefined' &&
+    window.localStorage.getItem(THEME_DYNAMIC_STORAGE_KEY) === 'true',
+  androidDynamicSeed: null,
   safeReading: true,
   selectedMailboxId: 'inbox',
   selectedMessageId: null,
@@ -60,12 +82,27 @@ export const useUiStore = create<UiState>((set) => ({
     }
     set({ themeMode });
   },
+  setThemePalette: (themePalette) => {
+    window.localStorage.setItem(THEME_PALETTE_STORAGE_KEY, themePalette);
+    set({ themePalette });
+  },
+  setCustomThemeSeed: (customThemeSeed) => {
+    window.localStorage.setItem(THEME_CUSTOM_SEED_STORAGE_KEY, customThemeSeed);
+    set({ customThemeSeed });
+  },
+  setAndroidDynamicColor: (androidDynamicColor) => {
+    window.localStorage.setItem(THEME_DYNAMIC_STORAGE_KEY, String(androidDynamicColor));
+    set({ androidDynamicColor });
+  },
+  setAndroidDynamicSeed: (androidDynamicSeed) => set({ androidDynamicSeed }),
   toggleSafeReading: () => set((state) => ({ safeReading: !state.safeReading })),
   setSafeReading: (safeReading) => set({ safeReading }),
-  selectMailbox: (selectedMailboxId) => set({ selectedMailboxId, navPage: 'mail', selectedMessageId: null }),
+  selectMailbox: (selectedMailboxId) =>
+    set({ selectedMailboxId, navPage: 'mail', selectedMessageId: null }),
   selectMessage: (selectedMessageId) => set({ selectedMessageId }),
   setSearchOpen: (searchOpen) => set({ searchOpen }),
-  setComposeOpen: (composeOpen) => set((state) => ({ composeOpen, composeDraft: composeOpen ? state.composeDraft : null })),
+  setComposeOpen: (composeOpen) =>
+    set((state) => ({ composeOpen, composeDraft: composeOpen ? state.composeDraft : null })),
   openComposeWithDraft: (composeDraft) => set({ composeDraft, composeOpen: true }),
   clearComposeDraft: () => set({ composeDraft: null }),
   setNavPage: (navPage) => set({ navPage }),

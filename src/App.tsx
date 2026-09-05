@@ -81,9 +81,9 @@ function MailApp() {
   }, [accountItems.length, accounts.isLoading, navigate]);
 
   useEffect(() => {
-    if (accountItems.length === 0 || isVirtualMailbox || selectedMailboxExists) return;
+    if (mailboxes.isPending || mailboxes.isError || accountItems.length === 0 || isVirtualMailbox || selectedMailboxExists) return;
     selectMailbox('inbox');
-  }, [accountItems.length, isVirtualMailbox, selectMailbox, selectedMailboxExists]);
+  }, [accountItems.length, isVirtualMailbox, mailboxes.isPending, mailboxes.isError, selectMailbox, selectedMailboxExists]);
 
   useEffect(() => {
     if (!isTauriRuntime) return undefined;

@@ -62,8 +62,18 @@ pub struct Message {
     pub is_starred: bool,
     pub has_attachment: bool,
     pub attachment_count: i64,
+    pub attachments: Vec<AttachmentInfo>,
     pub labels: Vec<String>,
     pub size_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInfo {
+    pub id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -942,9 +942,7 @@ fn map_incoming_message(message: &IncomingMessage) -> SyncedMessageInput {
             .unwrap_or_default();
         result.body_text = parsed.body_text(0).map(|value| value.into_owned());
         if parsed.html_body_count() > 0 {
-            result.body_html_text = parsed
-                .body_html(0)
-                .map(|value| crate::mime::sanitizer::html_to_safe_text(value.as_ref()));
+            result.body_html_text = parsed.body_html(0).map(|value| value.into_owned());
         }
         result.has_attachment = parsed.attachment_count() > 0;
     }

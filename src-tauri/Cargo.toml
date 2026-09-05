@@ -22,7 +22,7 @@ async-trait = "0.1.89"
 base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["serde", "clock"] }
 imap-proto = "0.16.7"
-keyring = { version = "4.2.0", default-features = true }
+keyring-core = "1.0.0"
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "native-tls", "tokio1-native-tls"] }
 mail-parser = { version = "0.11.8", features = ["full_encoding"] }
 native-tls = "0.2.14"
@@ -49,6 +49,20 @@ tauri-plugin-single-instance = "2"
 # `native-tls` is shared by IMAP and SMTP. On Android it needs a target OpenSSL,
 # so build a vendored copy with the NDK instead of probing the macOS/Linux host.
 openssl-sys = { version = "0.9", features = ["vendored"] }
+android-native-keyring-store = "1.0.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["protected"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1.1.0"
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "ios", target_os = "android"))))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["crypto-rust"] }
 
 [dev-dependencies]
 tempfile = "3.23.0"
