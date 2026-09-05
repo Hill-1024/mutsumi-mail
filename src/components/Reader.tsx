@@ -194,7 +194,7 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
 
         <div className={`reader-body ${htmlDocument ? 'is-html' : ''}`}>
           {htmlDocument ? (
-            <iframe className="reader-html-body" title="邮件正文" srcDoc={htmlDocument} sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" />
+            <iframe key={`${message.id}:${message.bodyNeedsRefresh ? 'cached' : 'original'}`} className="reader-html-body" title="邮件正文" srcDoc={htmlDocument} sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" />
           ) : readableBody.split('\n').map((paragraph, index) =>
             paragraph.trim() ? (
               <p key={`${message.id}-${index}`}>{paragraph}</p>

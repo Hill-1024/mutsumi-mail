@@ -60,6 +60,7 @@ export function MailHome({
           ...(hydratedMessages[messageInstanceKey(message)] ? {
             bodyText: hydratedMessages[messageInstanceKey(message)].bodyText,
             bodyHtmlText: hydratedMessages[messageInstanceKey(message)].bodyHtmlText,
+            bodyNeedsRefresh: hydratedMessages[messageInstanceKey(message)].bodyNeedsRefresh,
             attachments: hydratedMessages[messageInstanceKey(message)].attachments,
             attachmentCount: hydratedMessages[messageInstanceKey(message)].attachmentCount,
             hasAttachment: hydratedMessages[messageInstanceKey(message)].hasAttachment,
@@ -273,8 +274,7 @@ export function MailHome({
     (message: Message) => {
       const key = messageInstanceKey(message);
       if (
-        message.bodyText != null ||
-        message.bodyHtmlText != null ||
+        (!message.bodyNeedsRefresh && (message.bodyText != null || message.bodyHtmlText != null)) ||
         fetchedBodies.current.has(key) ||
         bodyRequests.current.has(key)
       )

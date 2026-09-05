@@ -576,3 +576,25 @@ it('正文下载完成不能覆盖后来同步的新星标状态', async () => {
   rerender(view({ ...original, isStarred: true }));
   expect(within(screen.getByRole('article')).getByRole('button', { name: '取消星标' })).toBeTruthy();
 });
+
+it('打开旧版损坏的 HTML 缓存时获取原文并保留新样式', async () => {
+  const original = message({ isRead: true, bodyText: '离线正文', bodyHtmlText: '已被剥离样式的旧正文', bodyNeedsRefresh: true });
+  const html = '<html><head><style>.notice{color:red}</style></head><body><p class="notice">完整原文</p></body></html>';
+  apiMocks.fetchMessageBody.mockResolvedValue({ ...original, bodyHtmlText: html, bodyNeedsRefresh: false });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><MailHome hasAccounts accounts={[account()]} messages={[original]} mailboxes={[]} isLoading={false} onOpenSettings={vi.fn()} /></MemoryRouter></QueryClientProvider>);
+  await waitFor(() => expect((screen.getByTitle('邮件正文') as HTMLIFrameElement).srcdoc).toContain(html));
+  expect(apiMocks.fetchMessageBody).toHaveBeenCalledTimes(1);
+});
+
+it('旧正文更新失败时仍保留缓存内容并允许重试', async () => {
+  const original = message({ isRead: true, bodyText: '离线正文', bodyHtmlText: '旧版缓存内容', bodyNeedsRefresh: true });
+  apiMocks.fetchMessageBody.mockRejectedValueOnce(new Error('连接失败')).mockResolvedValueOnce({ ...original, bodyHtmlText: '<p>恢复原文</p>', bodyNeedsRefresh: false });
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><MemoryRouter><MailHome hasAccounts accounts={[account()]} messages={[original]} mailboxes={[]} isLoading={false} onOpenSettings={vi.fn()} /></MemoryRouter></QueryClientProvider>);
+  await screen.findByText('连接失败');
+  expect((screen.getByTitle('邮件正文') as HTMLIFrameElement).srcdoc).toContain('旧版缓存内容');
+  fireEvent.click(screen.getByRole('button', { name: '重试' }));
+  await waitFor(() => expect((screen.getByTitle('邮件正文') as HTMLIFrameElement).srcdoc).toContain('<p>恢复原文</p>'));
+  expect(apiMocks.fetchMessageBody).toHaveBeenCalledTimes(2);
+});

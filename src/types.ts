@@ -88,6 +88,7 @@ export interface Message {
   preview: string;
   bodyText?: string;
   bodyHtmlText?: string;
+  bodyNeedsRefresh?: boolean;
   isRead: boolean;
   isStarred: boolean;
   hasAttachment: boolean;

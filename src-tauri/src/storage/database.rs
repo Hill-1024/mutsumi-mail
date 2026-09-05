@@ -201,7 +201,8 @@ impl Database {
         self.connection
             .execute_batch(concat!(
                 include_str!("../../migrations/0001_init.sql"),
-                "\nCREATE TABLE IF NOT EXISTS attachment_payloads (attachment_id TEXT PRIMARY KEY NOT NULL REFERENCES attachments(id) ON DELETE CASCADE, bytes BLOB NOT NULL);"
+                "\nCREATE TABLE IF NOT EXISTS attachment_payloads (attachment_id TEXT PRIMARY KEY NOT NULL REFERENCES attachments(id) ON DELETE CASCADE, bytes BLOB NOT NULL);",
+                include_str!("../../migrations/0002_refresh_legacy_html.sql")
             ))
             .map_err(AppError::from)
     }
@@ -1223,7 +1224,7 @@ impl Database {
         is_starred: Option<bool>,
         limit: u32,
     ) -> Result<Vec<Message>, AppError> {
-        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]')
+        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]'),m.body_cache_state='stale_html'
                      FROM messages m
                      JOIN accounts account ON account.id=m.account_id
                      JOIN message_instances mi ON mi.id=(
@@ -1276,7 +1277,7 @@ impl Database {
                 limit,
             );
         }
-        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]')
+        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]'),m.body_cache_state='stale_html'
                      FROM message_fts f
                      JOIN messages m ON m.id=f.message_id
                      JOIN accounts account ON account.id=m.account_id
@@ -1320,7 +1321,7 @@ impl Database {
     }
 
     pub fn get_message(&self, message_id: &str) -> Result<Message, AppError> {
-        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]')
+        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]'),m.body_cache_state='stale_html'
                      FROM messages m
                      JOIN message_instances mi ON mi.id=(
                        SELECT candidate.id
@@ -1345,7 +1346,7 @@ impl Database {
         message_id: &str,
         mailbox_id: &str,
     ) -> Result<Message, AppError> {
-        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]')
+        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]'),m.body_cache_state='stale_html'
                      FROM messages m
                      JOIN message_instances mi ON mi.message_id=m.id AND mi.mailbox_id=?2 AND mi.is_deleted=0
                      JOIN mailboxes selected_mailbox ON selected_mailbox.id=mi.mailbox_id AND selected_mailbox.account_id=m.account_id AND selected_mailbox.selectable=1
@@ -2818,6 +2819,7 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         preview: row.get(8)?,
         body_text: row.get(9)?,
         body_html_text: row.get(10)?,
+        body_needs_refresh: row.get(20)?,
         is_read,
         is_starred,
         has_attachment: row.get::<_, i64>(13)? != 0,
@@ -5162,6 +5164,23 @@ mod tests {
             .expect("messages")
             .remove(0)
             .id;
+        // Simulate the old version's destructive HTML cache and first upgrade.
+        database.connection.execute(
+            "UPDATE messages SET body_text='Offline fallback',body_html_text='Stripped HTML',body_cache_state='full' WHERE id=?",
+            [&message_id],
+        ).unwrap();
+        database
+            .connection
+            .execute("DELETE FROM schema_migrations WHERE version=2", [])
+            .unwrap();
+        database.migrate().unwrap();
+        let stale = database
+            .get_message_in_mailbox(&message_id, &mailbox_id)
+            .unwrap();
+        assert!(stale.body_needs_refresh);
+        assert_eq!(stale.body_text.as_deref(), Some("Offline fallback"));
+        assert_eq!(stale.body_html_text.as_deref(), Some("Stripped HTML"));
+        database.migrate().unwrap();
         let locator = database
             .imap_body_locator(&message_id, &mailbox_id)
             .expect("body locator");
@@ -5179,7 +5198,7 @@ mod tests {
                 &HydratedMessageBody {
                     preview: "Hydrated preview".into(),
                     body_text: Some("Hydrated body".into()),
-                    body_html_text: None,
+                    body_html_text: Some("<style>p{color:red}</style><p>Hydrated body</p>".into()),
                     has_attachment: true,
                     attachments: vec![ParsedAttachment {
                         filename: "notes.txt".into(),
@@ -5189,6 +5208,19 @@ mod tests {
                 },
             )
             .expect("hydrate body");
+        assert!(!hydrated.body_needs_refresh);
+        database.migrate().unwrap();
+        assert!(
+            !database
+                .get_message_in_mailbox(&message_id, &mailbox_id)
+                .unwrap()
+                .body_needs_refresh
+        );
+        assert_eq!(
+            hydrated.body_html_text.as_deref(),
+            Some("<style>p{color:red}</style><p>Hydrated body</p>")
+        );
+
         assert_eq!(hydrated.body_text.as_deref(), Some("Hydrated body"));
         assert_eq!(hydrated.preview, "Hydrated preview");
         assert!(hydrated.has_attachment);

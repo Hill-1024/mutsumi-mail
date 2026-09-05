@@ -58,6 +58,7 @@ pub struct Message {
     pub preview: String,
     pub body_text: Option<String>,
     pub body_html_text: Option<String>,
+    pub body_needs_refresh: bool,
     pub is_read: bool,
     pub is_starred: bool,
     pub has_attachment: bool,
