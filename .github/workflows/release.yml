@@ -31,6 +31,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF_TYPE" = "tag"
           node scripts/verify-release-version.mjs "$GITHUB_REF_NAME"
+          test -s "docs/releases/$GITHUB_REF_NAME.md"
 
   quality:
     name: Release quality gate
@@ -368,6 +369,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: "*-*"
@@ -393,6 +395,6 @@ jobs:
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --repo "$GH_REPO" \
               --title "Mutsumi Mail ${GITHUB_REF_NAME#v}" \
-              --notes $'首个公开版本。\n\nmacOS 包使用固定 ad-hoc 签名且未经过 Apple 公证；首次打开如被拦截，请在“系统设置 → 隐私与安全性”中允许。Windows 包使用项目固定的自签名证书，Android 包使用项目固定 keystore。请使用随附 SHA256SUMS.txt 校验下载文件。' \
+              --notes-file "docs/releases/$GITHUB_REF_NAME.md" \
               --verify-tag
           fi
