@@ -61,3 +61,13 @@ it('applies recipient, account and folder filters instead of silently ignoring t
   expect(filterMessages([item], 'account:other')).toHaveLength(0);
   expect(filterMessages([item], 'folder:other')).toHaveLength(0);
 });
+
+it('matches account: against the visible email or display name when accounts are known', () => {
+  const item = messages[0];
+  const accounts = [
+    { id: 'account-test', email: 'mutsumi@example.test', displayName: '若叶睦' },
+  ];
+  expect(filterMessages([item], 'account:mutsumi', accounts)).toHaveLength(1);
+  expect(filterMessages([item], 'account:若叶睦', accounts)).toHaveLength(1);
+  expect(filterMessages([item], 'account:qq.com', accounts)).toHaveLength(0);
+});

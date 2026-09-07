@@ -35,7 +35,20 @@ impl SyncCoordinator {
         token
     }
     pub fn try_start(&self, account_id: &str) -> Option<CancellationToken> {
-        let token = CancellationToken::new();
+        self.try_start_with_token(account_id, CancellationToken::new())
+    }
+    pub fn try_start_child(
+        &self,
+        account_id: &str,
+        parent: &CancellationToken,
+    ) -> Option<CancellationToken> {
+        self.try_start_with_token(account_id, parent.child_token())
+    }
+    fn try_start_with_token(
+        &self,
+        account_id: &str,
+        token: CancellationToken,
+    ) -> Option<CancellationToken> {
         let mut tokens = self.tokens.lock().ok()?;
         if tokens.contains_key(account_id) {
             return None;
@@ -149,7 +162,10 @@ impl SyncCoordinator {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RealtimeState {
-    network_allowed: bool,
+    online: bool,
+    foreground: bool,
+    background_allowed: bool,
+    connection_epoch: u64,
     revision: u64,
 }
 
@@ -163,7 +179,10 @@ pub struct RealtimeSyncCoordinator {
 impl RealtimeSyncCoordinator {
     pub fn new() -> Self {
         let (state_changes, _) = watch::channel(RealtimeState {
-            network_allowed: true,
+            online: true,
+            foreground: !cfg!(target_os = "android"),
+            background_allowed: !cfg!(any(target_os = "android", target_os = "ios")),
+            connection_epoch: 0,
             revision: 0,
         });
         Self {
@@ -173,7 +192,8 @@ impl RealtimeSyncCoordinator {
     }
 
     pub fn network_allowed(&self) -> bool {
-        self.state_changes.borrow().network_allowed
+        let state = self.state_changes.borrow();
+        state.online && (state.foreground || state.background_allowed)
     }
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<RealtimeState> {
@@ -200,26 +220,63 @@ impl RealtimeSyncCoordinator {
             .unwrap_or_default()
     }
 
-    #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     pub fn suspend(&self) {
-        self.update_state(|state| state.network_allowed = false);
+        self.update_state(|state| {
+            state.foreground = false;
+            state.background_allowed = false;
+        });
     }
 
     #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
     pub fn resume(&self) {
-        self.update_state(|state| state.network_allowed = true);
+        self.set_foreground(true);
+    }
+
+    pub fn set_foreground(&self, foreground: bool) {
+        self.update_state(|state| state.foreground = foreground);
+    }
+
+    #[cfg(test)]
+    pub fn set_background_allowed(&self, allowed: bool) {
+        self.update_state(|state| state.background_allowed = allowed);
+    }
+
+    #[cfg(test)]
+    pub fn set_online(&self, online: bool) {
+        self.update_state(|state| state.online = online);
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub fn set_platform_state(&self, online: bool, foreground: bool, background: bool) {
+        self.update_state(|state| {
+            state.online = online;
+            state.foreground = foreground;
+            state.background_allowed = background;
+        });
+    }
+
+    pub fn connection_epoch(&self) -> u64 {
+        self.state_changes.borrow().connection_epoch
     }
 
     fn update_state(&self, update: impl FnOnce(&mut RealtimeState)) {
-        let mut next = *self.state_changes.borrow();
-        update(&mut next);
-        next.revision = next.revision.wrapping_add(1);
-        self.state_changes.send_replace(next);
+        // Platform callbacks can race account updates. Mutate the watch value atomically so a
+        // foreground event cannot accidentally overwrite an offline or service-timeout state.
+        self.state_changes.send_modify(|state| {
+            let allowed = state.online && (state.foreground || state.background_allowed);
+            update(state);
+            if !allowed && state.online && (state.foreground || state.background_allowed) {
+                state.connection_epoch = state.connection_epoch.wrapping_add(1);
+            }
+            state.revision = state.revision.wrapping_add(1);
+        });
     }
 }
 
+#[derive(Clone)]
 pub struct AppState {
-    pub database: Mutex<Database>,
+    pub database: Arc<Mutex<Database>>,
     pub secret_store: Arc<dyn SecretStore>,
     pub sync: Arc<SyncCoordinator>,
     pub realtime: Arc<RealtimeSyncCoordinator>,
@@ -228,7 +285,7 @@ pub struct AppState {
 impl AppState {
     pub fn open(path: &Path) -> Result<Self, AppError> {
         Ok(Self {
-            database: Mutex::new(Database::open(path)?),
+            database: Arc::new(Mutex::new(Database::open(path)?)),
             secret_store: Arc::new(
                 LocalSecretStore::open(&path.with_file_name("credentials"))
                     .map_err(|error| AppError::SecretStore(error.to_string()))?,
@@ -277,6 +334,25 @@ mod tests {
     }
 
     #[test]
+    fn stopping_background_cancels_its_transfer_but_not_a_replacing_manual_sync() {
+        let coordinator = SyncCoordinator::new();
+        let lifetime = CancellationToken::new();
+        let background = coordinator.try_start_child("account", &lifetime).unwrap();
+        lifetime.cancel();
+        assert!(background.is_cancelled());
+        assert!(
+            coordinator.is_active("account"),
+            "keep the slot until cleanup finishes"
+        );
+        let manual = coordinator.start("account");
+        assert!(!manual.is_cancelled());
+        assert!(coordinator
+            .finish_current("account", &background, || ())
+            .is_none());
+        assert!(coordinator.is_active("account"));
+    }
+
+    #[test]
     fn stale_sync_cannot_publish_progress() {
         let coordinator = SyncCoordinator::new();
         let stale = coordinator.start("account");
@@ -322,5 +398,61 @@ mod tests {
         coordinator.resume();
         assert!(changes.has_changed().expect("sender is alive"));
         assert!(coordinator.network_allowed());
+    }
+
+    #[test]
+    fn foreground_does_not_override_offline_and_service_expiry_stops_background() {
+        let coordinator = RealtimeSyncCoordinator::new();
+        coordinator.set_online(false);
+        coordinator.set_foreground(true);
+        assert!(!coordinator.network_allowed());
+        let epoch = coordinator.connection_epoch();
+        coordinator.set_online(true);
+        assert!(coordinator.connection_epoch() > epoch);
+        coordinator.set_background_allowed(true);
+        coordinator.set_foreground(false);
+        assert!(
+            coordinator.network_allowed(),
+            "the foreground service owns background time"
+        );
+        coordinator.set_background_allowed(false);
+        assert!(
+            !coordinator.network_allowed(),
+            "expiry must stop IDLE and watchdog workers"
+        );
+        coordinator.set_foreground(true);
+        assert!(coordinator.network_allowed());
+    }
+
+    #[test]
+    fn activity_service_handoff_is_atomic_and_does_not_reconnect_a_live_socket() {
+        let coordinator = RealtimeSyncCoordinator::new();
+        coordinator.set_platform_state(true, true, false);
+        let epoch = coordinator.connection_epoch();
+        coordinator.set_platform_state(true, false, true);
+        assert!(coordinator.network_allowed());
+        assert_eq!(coordinator.connection_epoch(), epoch);
+        coordinator.set_platform_state(false, true, true);
+        assert!(!coordinator.network_allowed());
+        coordinator.set_platform_state(true, true, true);
+        assert_eq!(coordinator.connection_epoch(), epoch + 1);
+    }
+
+    #[test]
+    fn rapid_network_recovery_keeps_a_restart_epoch_even_if_offline_event_is_coalesced() {
+        let coordinator = RealtimeSyncCoordinator::new();
+        let before = coordinator.connection_epoch();
+        coordinator.set_online(false);
+        coordinator.set_online(true);
+        assert!(coordinator.network_allowed());
+        assert_ne!(before, coordinator.connection_epoch());
+        let after = coordinator.connection_epoch();
+        coordinator.wake();
+        coordinator.set_foreground(true);
+        assert_eq!(
+            after,
+            coordinator.connection_epoch(),
+            "ordinary focus must not churn sockets"
+        );
     }
 }

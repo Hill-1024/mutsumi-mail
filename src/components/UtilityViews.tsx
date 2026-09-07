@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { BackgroundSettings } from './BackgroundSettings';
+import { useAppNavigation } from '../lib/navigation';
+import { readMailData } from '../lib/optimistic-flags';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { Account, Message, OutboxItem, ThemePaletteId } from '../types';
 import { Icon } from '../lib/icons';
 import {
@@ -25,7 +27,30 @@ import {
 } from '../lib/platform-permissions';
 import { useUiStore } from '../stores/ui';
 
-export function SearchView({ messages, accountId }: { messages: Message[]; accountId?: string }) {
+/** Defers a rapidly changing value so per-keystroke IPC queries settle before firing. */
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+  return debounced;
+}
+
+// Backend settings seed the UI store once per session. Re-seeding on every Settings
+// mount would silently revert changes made outside Settings (e.g. the topbar theme
+// toggle) back to the persisted snapshot while the store is the live source of truth.
+let settingsHydrated = false;
+
+export function SearchView({
+  messages,
+  accounts,
+  accountId,
+}: {
+  messages: Message[];
+  accounts: Account[];
+  accountId?: string;
+}) {
   const [query, setQuery] = useState('');
   const [activeFilter, setActiveFilter] = useState<'all' | 'unread' | 'starred' | 'attachment'>(
     'all',
@@ -33,7 +58,8 @@ export function SearchView({ messages, accountId }: { messages: Message[]; accou
   const selectMessage = useUiStore((state) => state.selectMessage);
   const selectMailbox = useUiStore((state) => state.selectMailbox);
   const setNavPage = useUiStore((state) => state.setNavPage);
-  const navigate = useNavigate();
+  const navigate = useAppNavigation();
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     setNavPage('search');
@@ -41,18 +67,23 @@ export function SearchView({ messages, accountId }: { messages: Message[]; accou
 
   const isStructured = /(?:^|\s)(?:from|to|subject|before|after|account|folder|is|has):/i.test(query);
   const textQuery = isStructured ? parseSearch(query).freeText : query;
+  const debouncedTextQuery = useDebouncedValue(textQuery, 220);
   const search = useQuery({
-    queryKey: ['search', accountId ?? 'all', query],
-    queryFn: () => searchMessages({ accountId, search: textQuery, limit: 500 }),
+    queryKey: ['search', accountId ?? 'all', debouncedTextQuery],
+    queryFn: () => readMailData(queryClient, () => searchMessages({ accountId, search: debouncedTextQuery, limit: 500 })),
     enabled: query.trim().length > 0,
     staleTime: 10_000,
+    // Keep the previous result set on screen while a new query is in flight so the
+    // list never flashes empty between keystrokes.
+    placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === (accountId ?? 'all')
+      ? keepPreviousData(previous) : undefined,
   });
 
   const baseResults = useMemo(() => {
     if (!query.trim()) return messages;
-    if (isStructured) return filterMessages(search.data ?? [], query);
+    if (isStructured) return filterMessages(search.data ?? [], query, accounts);
     return search.data ?? [];
-  }, [query, messages, isStructured, search.data]);
+  }, [query, messages, accounts, isStructured, search.data]);
 
   const filteredResults = useMemo(() => {
     if (activeFilter === 'unread') return baseResults.filter((m) => !m.isRead);
@@ -137,9 +168,10 @@ export function SearchView({ messages, accountId }: { messages: Message[]; accou
               key={message.id}
               className="search-result"
               onClick={() => {
-                selectMailbox(message.mailboxId);
-                selectMessage(message.id);
-                navigate('/mail');
+                navigate('/mail', () => {
+                  selectMailbox(message.mailboxId);
+                  selectMessage(message.id);
+                });
               }}
             >
               <span className="result-avatar">
@@ -340,6 +372,7 @@ export function SettingsView({
   const [credentialFeedback, setCredentialFeedback] = useState('');
   const queryClient = useQueryClient();
   const [cacheStatus, setCacheStatus] = useState('');
+  const [cacheError, setCacheError] = useState('');
   const [syncPolicy, setSyncPolicy] = useState('automatic');
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
@@ -353,18 +386,25 @@ export function SettingsView({
 
   useEffect(() => {
     setNavPage('settings');
+    const before = useUiStore.getState();
     void getSettings()
       .then((settings) => {
-        if (isTauriRuntime) {
-          if (settings.theme) setThemeMode(settings.theme);
-          if (settings.colorScheme) setThemePalette(settings.colorScheme);
-          if (settings.customThemeSeed) setCustomThemeSeed(settings.customThemeSeed);
-          setAndroidDynamicColor(settings.androidDynamicColor);
+        if (!settingsHydrated) {
+          const current = useUiStore.getState();
+          if (isTauriRuntime) {
+            if (settings.theme && current.themeMode === before.themeMode) setThemeMode(settings.theme);
+            if (settings.colorScheme && current.themePalette === before.themePalette) setThemePalette(settings.colorScheme);
+            if (settings.customThemeSeed && current.customThemeSeed === before.customThemeSeed) setCustomThemeSeed(settings.customThemeSeed);
+            if (current.androidDynamicColor === before.androidDynamicColor) setAndroidDynamicColor(settings.androidDynamicColor);
+          }
+          if (current.safeReading === before.safeReading) setSafeReading(settings.safeReading);
+          settingsHydrated = true;
         }
-        setSafeReading(settings.safeReading);
         setSyncPolicy(settings.syncPolicy);
       })
-      .catch(() => undefined);
+      .catch(() => {
+        settingsHydrated = false;
+      });
   }, [
     setAndroidDynamicColor,
     setCustomThemeSeed,
@@ -432,10 +472,18 @@ export function SettingsView({
   };
 
   const manageCache = async () => {
+    if (cacheStatus === '正在清理本地临时缓存…') return;
+    setCacheError('');
     setCacheStatus('正在清理本地临时缓存…');
-    const result = await clearCache();
-    setCacheStatus(`缓存清理完毕 · 已释放 ${result.deletedMessages} 封本地缓存邮件`);
-    window.setTimeout(() => setCacheStatus(''), 4000);
+    try {
+      const result = await clearCache();
+      await Promise.all(['messages', 'message', 'search'].map((key) => queryClient.invalidateQueries({ queryKey: [key] })));
+      setCacheStatus(`缓存清理完毕 · 已释放 ${result.deletedMessages} 封本地缓存邮件`);
+      window.setTimeout(() => setCacheStatus(''), 4000);
+    } catch (error) {
+      setCacheStatus('');
+      setCacheError(appErrorMessage(error));
+    }
   };
 
   const removeSelectedAccount = async (accountId: string) => {
@@ -639,6 +687,8 @@ export function SettingsView({
           )}
         </div>
 
+        <BackgroundSettings />
+
         <div className="settings-section">
           <div className="settings-section-title">
             <Icon name="sun" size={20} />
@@ -764,6 +814,12 @@ export function SettingsView({
             <div className="setting-feedback">
               <Icon name="checkCircle" size={16} />
               <span>{cacheStatus}</span>
+            </div>
+          )}
+          {cacheError && (
+            <div className="setting-feedback is-error" role="alert">
+              <Icon name="close" size={16} />
+              <span>{cacheError}</span>
             </div>
           )}
         </div>

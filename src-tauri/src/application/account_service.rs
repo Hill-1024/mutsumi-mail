@@ -541,7 +541,7 @@ mod tests {
 
     fn state_with_store(store: Arc<dyn SecretStore>) -> AppState {
         AppState {
-            database: Mutex::new(Database::open_in_memory().expect("database")),
+            database: Mutex::new(Database::open_in_memory().expect("database")).into(),
             secret_store: store,
             sync: Arc::new(SyncCoordinator::new()),
             realtime: Arc::new(RealtimeSyncCoordinator::new()),

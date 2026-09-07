@@ -15,6 +15,7 @@ import type {
 
 export const isTauriRuntime = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 export interface AppSettings {
+  backgroundMail?: boolean;
   theme: 'system' | 'light' | 'dark';
   colorScheme: ThemePaletteId;
   customThemeSeed: string;
@@ -112,8 +113,8 @@ export async function deleteMessages(
   return call('delete_messages', { messages, permanent });
 }
 
-export async function getMessage(messageId: string): Promise<Message> {
-  return call<Message>('get_message', { messageId });
+export async function getMessage(messageId: string, mailboxId?: string): Promise<Message> {
+  return call<Message>('get_message', { messageId, mailboxId });
 }
 
 export async function fetchMessageBody(message: MessageInstanceRef): Promise<Message> {

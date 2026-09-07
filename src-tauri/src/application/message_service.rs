@@ -10,18 +10,6 @@ use crate::errors::AppError;
 use crate::mime::parser::parse_rfc822;
 use crate::storage::database::{HydratedMessageBody, ImapBodyLocator};
 
-pub fn list_messages(
-    state: &AppState,
-    mailbox_id: Option<String>,
-    limit: u32,
-) -> Result<Vec<Message>, AppError> {
-    state
-        .database
-        .lock()
-        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
-        .list_messages(mailbox_id.as_deref(), limit.min(500))
-}
-
 pub fn list_messages_in_scope(
     state: &AppState,
     account_id: Option<String>,
@@ -42,12 +30,19 @@ pub fn list_messages_in_scope(
             limit.min(500),
         )
 }
-pub fn get_message(state: &AppState, message_id: String) -> Result<Message, AppError> {
-    state
+pub fn get_message(
+    state: &AppState,
+    message_id: String,
+    mailbox_id: Option<String>,
+) -> Result<Message, AppError> {
+    let database = state
         .database
         .lock()
-        .map_err(|_| AppError::Internal("database lock poisoned".into()))?
-        .get_message(&message_id)
+        .map_err(|_| AppError::Internal("database lock poisoned".into()))?;
+    match mailbox_id {
+        Some(mailbox_id) => database.get_message_in_mailbox(&message_id, &mailbox_id),
+        None => database.get_message(&message_id),
+    }
 }
 
 pub async fn fetch_message_body(
@@ -327,7 +322,7 @@ mod tests {
             .id;
         (
             AppState {
-                database: Mutex::new(database),
+                database: Mutex::new(database).into(),
                 secret_store: Arc::new(TestSecretStore),
                 sync: Arc::new(SyncCoordinator::new()),
                 realtime: Arc::new(RealtimeSyncCoordinator::new()),

@@ -66,11 +66,17 @@ export function ComposeDialog({
   defaultAccountId,
   onClose,
   onQueued,
+  closing = false,
+  onAnimationEnd,
 }: {
   accounts: Account[];
   defaultAccountId?: string | null;
   onClose: () => void;
   onQueued?: (item: OutboxItem) => void;
+  /** True while the parent plays the exit animation; input is disabled via CSS. */
+  closing?: boolean;
+  /** Released by the parent when the scrim's exit animation finishes. */
+  onAnimationEnd?: (event: { target: EventTarget | null; currentTarget: Element }) => void;
 }) {
   const queryClient = useQueryClient();
   const { composeDraft, clearComposeDraft } = useUiStore();
@@ -118,6 +124,7 @@ export function ComposeDialog({
 
   // Handle escape key
   useEffect(() => {
+    if (closing) return undefined;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !submitting.current && status !== 'queued') {
         e.preventDefault();
@@ -127,14 +134,15 @@ export function ComposeDialog({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [attachments.length, composeDraft, isDirty, onClose, status]);
+  }, [attachments.length, closing, composeDraft, isDirty, onClose, status]);
 
   useEffect(() => () => window.clearTimeout(closeTimer.current), []);
 
   // Auto-save draft
   useEffect(() => {
-    if (status === 'saving' || status === 'queued') return undefined;
+    if (closing || status === 'saving' || status === 'queued') return undefined;
     const timer = window.setTimeout(() => {
+      if (submitting.current) return;
       if (isDirty && selectedSenderId) {
         if (watchedValues.bodyText || watchedValues.subject) {
           const input = {
@@ -148,7 +156,7 @@ export function ComposeDialog({
             inReplyTo: composeDraft?.inReplyTo,
             references: composeDraft?.references,
           };
-          saving.current = saving.current.catch(() => undefined).then(() => saveDraft(input));
+          saving.current = saving.current.catch(() => undefined).then(() => submitting.current ? undefined : saveDraft(input));
           void saving.current.catch(() => {
             setStatusMessage('自动保存失败，请手动保存草稿。');
           });
@@ -157,6 +165,7 @@ export function ComposeDialog({
     }, 1200);
     return () => window.clearTimeout(timer);
   }, [
+    closing,
     composeDraft?.inReplyTo,
     composeDraft?.references,
     draftId,
@@ -290,22 +299,23 @@ export function ComposeDialog({
   };
 
   const handleScrimClose = () => {
-    if (submitting.current || status === 'queued') return;
+    if (closing || submitting.current || status === 'queued') return;
     if (isDirty || attachments.length || composeDraft) setConfirmClose(true);
     else onClose();
   };
 
   return (
     <div
-      className="modal-scrim"
+      className={`modal-scrim ${closing ? 'is-exiting' : ''}`}
       role="presentation"
+      onAnimationEnd={onAnimationEnd}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) handleScrimClose();
       }}
     >
       <section
         ref={dialogRef}
-        className="compose-dialog"
+        className={`compose-dialog ${closing ? 'is-exiting' : ''}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="compose-title"

@@ -1,4 +1,4 @@
-import type { Message } from '../types';
+import type { Account, Message } from '../types';
 
 export function normalizeSubject(subject: string): string {
   return subject.replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/giu, '').replace(/\s+/g, ' ').trim().toLocaleLowerCase();
@@ -27,7 +27,7 @@ export function parseSearch(input: string): SearchFilters {
     if (separator <= 0) { free.push(token); continue; }
     const key = token.slice(0, separator).toLowerCase();
     const raw = token.slice(separator + 1).replace(/^"|"$/g, '');
-    if (key === 'from' || key === 'to' || key === 'subject' || key === 'before' || key === 'after' || key === 'account' || key === 'folder') (filters as unknown as Record<string, unknown>)[key] = raw;
+    if (key === 'from' || key === 'to' || key === 'subject' || key === 'before' || key === 'after' || key === 'account' || key === 'folder') filters[key] = raw;
     else if (key === 'is' && raw === 'unread') filters.isUnread = true;
     else if (key === 'is' && raw === 'starred') filters.isStarred = true;
     else if (key === 'has' && raw === 'attachment') filters.hasAttachment = true;
@@ -37,13 +37,23 @@ export function parseSearch(input: string): SearchFilters {
   return filters;
 }
 
-export function filterMessages(messages: Message[], input: string): Message[] {
+export function filterMessages(
+  messages: Message[],
+  input: string,
+  accounts?: Pick<Account, 'id' | 'email' | 'displayName'>[],
+): Message[] {
   const filters = parseSearch(input);
   const q = filters.freeText.toLocaleLowerCase();
+  // `account:` is user facing, so match against the visible email/display name when the
+  // account list is available; the raw id stays a fallback (it is opaque to users).
+  const accountOf = (message: Message) => {
+    const account = accounts?.find((candidate) => candidate.id === message.accountId);
+    return account ? `${account.email} ${account.displayName}` : message.accountId;
+  };
   return messages.filter((message) => {
     const haystack = `${message.subject} ${message.preview} ${message.bodyText ?? ''} ${message.from.email}`.toLocaleLowerCase();
     const contains = (value: string, query: string) => value.toLocaleLowerCase().includes(query.toLocaleLowerCase());
-    return (!filters.to || message.to.some((address) => contains(`${address.name ?? ''} ${address.email}`, filters.to!))) && (!filters.account || contains(message.accountId, filters.account)) && (!filters.folder || [message.mailboxId, ...message.labels].some((label) => contains(label, filters.folder!))) && (!q || haystack.includes(q)) && (!filters.from || message.from.email.toLocaleLowerCase().includes(filters.from.toLocaleLowerCase())) && (!filters.subject || message.subject.toLocaleLowerCase().includes(filters.subject.toLocaleLowerCase())) && (!filters.isUnread || !message.isRead) && (!filters.isStarred || message.isStarred) && (!filters.hasAttachment || message.hasAttachment) && (!filters.before || message.date.slice(0, 10) < filters.before) && (!filters.after || message.date.slice(0, 10) > filters.after);
+    return (!filters.to || message.to.some((address) => contains(`${address.name ?? ''} ${address.email}`, filters.to ?? ''))) && (!filters.account || contains(accountOf(message), filters.account)) && (!filters.folder || [message.mailboxId, ...message.labels].some((label) => contains(label, filters.folder ?? ''))) && (!q || haystack.includes(q)) && (!filters.from || message.from.email.toLocaleLowerCase().includes(filters.from.toLocaleLowerCase())) && (!filters.subject || message.subject.toLocaleLowerCase().includes(filters.subject.toLocaleLowerCase())) && (!filters.isUnread || !message.isRead) && (!filters.isStarred || message.isStarred) && (!filters.hasAttachment || message.hasAttachment) && (!filters.before || message.date.slice(0, 10) < filters.before) && (!filters.after || message.date.slice(0, 10) > filters.after);
   });
 }
 

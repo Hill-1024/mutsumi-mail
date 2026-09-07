@@ -4,13 +4,12 @@ import type { Account, Mailbox, Message } from '../types';
 import { MessageList } from './MessageList';
 import { Reader } from './Reader';
 import { useUiStore } from '../stores/ui';
+import { applyFlagMutation, messageInstanceKey, readMailData } from '../lib/optimistic-flags';
 import {
   appErrorMessage,
   deleteMessages,
   fetchMessageBody,
   moveMessages,
-  mutateMessage,
-  mutateMessages,
 } from '../lib/tauri';
 import { Icon } from '../lib/icons';
 
@@ -22,6 +21,9 @@ export function MailHome({
   messages,
   mailboxes,
   isLoading,
+  isRefreshing = false,
+  loadError,
+  onRetry,
   onSync,
   onOpenSettings,
 }: {
@@ -30,6 +32,10 @@ export function MailHome({
   messages: Message[];
   mailboxes: Mailbox[];
   isLoading: boolean;
+  /** True while placeholder (previous folder) data is on screen during a refetch. */
+  isRefreshing?: boolean;
+  loadError?: string;
+  onRetry?: () => void;
   onSync?: () => void;
   onOpenSettings: () => void;
 }) {
@@ -39,18 +45,13 @@ export function MailHome({
   const [isSinglePane, setIsSinglePane] = useState(
     () => typeof window !== 'undefined' && window.matchMedia(singlePaneQuery).matches,
   );
-  const [optimisticFlags, setOptimisticFlags] = useState<Record<string, MessageMutation>>({});
   const [removedMessageKeys, setRemovedMessageKeys] = useState<Set<string>>(() => new Set());
   const [hydratedMessages, setHydratedMessages] = useState<Record<string, Message>>({});
-  const [bodyLoadingKey, setBodyLoadingKey] = useState<string | null>(null);
+  const [loadingBodyKeys, setLoadingBodyKeys] = useState<Set<string>>(() => new Set());
   const [bodyErrors, setBodyErrors] = useState<Record<string, string>>({});
   const bodyRequests = useRef(new Set<string>());
+  const removalRequests = useRef(new Set<string>());
   const fetchedBodies = useRef(new Set<string>());
-  const readOnOpenAttempted = useRef(new Set<string>());
-  const messageInstanceKey = useCallback(
-    (message: Pick<Message, 'id' | 'mailboxId'>) => `${message.id}\u0000${message.mailboxId}`,
-    [],
-  );
   const localMessages = useMemo(
     () =>
       messages
@@ -65,9 +66,8 @@ export function MailHome({
             attachmentCount: hydratedMessages[messageInstanceKey(message)].attachmentCount,
             hasAttachment: hydratedMessages[messageInstanceKey(message)].hasAttachment,
           } : {}),
-          ...optimisticFlags[messageInstanceKey(message)],
         })),
-    [hydratedMessages, messageInstanceKey, messages, optimisticFlags, removedMessageKeys],
+    [hydratedMessages, messages, removedMessageKeys],
   );
 
   useEffect(() => {
@@ -89,87 +89,33 @@ export function MailHome({
   useEffect(() => {
     if (
       !isLoading &&
+      !isRefreshing &&
       selectedMessageId &&
       !localMessages.some((message) => message.id === selectedMessageId)
     ) {
       selectMessage(null);
     }
-  }, [isLoading, localMessages, selectMessage, selectedMessageId]);
+  }, [isLoading, isRefreshing, localMessages, selectMessage, selectedMessageId]);
+
+  const applyBulkMutation = useCallback(
+    async (selectedMessages: Message[], mutation: MessageMutation) => {
+      if (isRefreshing || selectedMessages.some((message) => removalRequests.current.has(messageInstanceKey(message)))) return;
+      try {
+        await applyFlagMutation(queryClient, selectedMessages, mutation);
+      } catch (error) {
+        setSyncMessage(appErrorMessage(error));
+        throw error;
+      }
+    },
+    [isRefreshing, queryClient, setSyncMessage],
+  );
 
   const applyMutation = useCallback(
     async (messageId: string, mutation: MessageMutation) => {
       const source = localMessages.find((message) => message.id === messageId);
-      if (!source) return;
-      const key = messageInstanceKey(source);
-      setOptimisticFlags((current) => ({ ...current, [key]: { ...current[key], ...mutation } }));
-      try {
-        await mutateMessage({ messageId, mailboxId: source.mailboxId }, mutation);
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['mailboxes'] }),
-          queryClient.invalidateQueries({ queryKey: ['messages'] }),
-          queryClient.invalidateQueries({ queryKey: ['search'] }),
-        ]);
-      } catch (error) {
-        setOptimisticFlags((current) => {
-          const next = { ...current };
-          delete next[key];
-          return next;
-        });
-        setSyncMessage(appErrorMessage(error));
-        throw error;
-      } finally {
-        setOptimisticFlags((current) => { const next = { ...current }; delete next[key]; return next; });
-      }
+      if (source) await applyBulkMutation([source], mutation);
     },
-    [localMessages, messageInstanceKey, queryClient, setSyncMessage],
-  );
-
-  const applyBulkMutation = useCallback(
-    async (selectedMessages: Message[], mutation: MessageMutation) => {
-      const uniqueMessages = Array.from(
-        new Map(selectedMessages.map((message) => [messageInstanceKey(message), message])),
-      ).map(([, message]) => message);
-      if (uniqueMessages.length === 0) return;
-
-      const keys = uniqueMessages.map(messageInstanceKey);
-      setOptimisticFlags((current) => {
-        const next = { ...current };
-        for (const message of uniqueMessages) {
-          const key = messageInstanceKey(message);
-          next[key] = { ...next[key], ...mutation };
-        }
-        return next;
-      });
-
-      try {
-        const result = await mutateMessages(
-          uniqueMessages.map((message) => ({
-            messageId: message.id,
-            mailboxId: message.mailboxId,
-          })),
-          mutation,
-        );
-        if (result.mutated !== uniqueMessages.length) {
-          throw new Error('部分邮件状态未能更新');
-        }
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ['mailboxes'] }),
-          queryClient.invalidateQueries({ queryKey: ['messages'] }),
-          queryClient.invalidateQueries({ queryKey: ['search'] }),
-        ]);
-      } catch (error) {
-        setOptimisticFlags((current) => {
-          const next = { ...current };
-          for (const key of keys) delete next[key];
-          return next;
-        });
-        setSyncMessage(appErrorMessage(error));
-        throw error;
-      } finally {
-        setOptimisticFlags((current) => { const next = { ...current }; for (const key of keys) delete next[key]; return next; });
-      }
-    },
-    [messageInstanceKey, queryClient, setSyncMessage],
+    [applyBulkMutation, localMessages],
   );
 
   const getNextMessageId = (currentId: string) => {
@@ -180,40 +126,51 @@ export function MailHome({
 
   const archiveMessage = (messageId: string) => {
     const source = localMessages.find((message) => message.id === messageId);
-    if (!source) return;
+    if (!source || isRefreshing) return;
     const accountMailboxes = mailboxes.filter((mailbox) => mailbox.accountId === source.accountId);
     const target = accountMailboxes.find((mailbox) => mailbox.specialRole === 'archive');
     if (!target) {
       setSyncMessage('当前账户未提供归档文件夹');
       return;
     }
+    if (target.id === source.mailboxId) return;
+    const key = messageInstanceKey(source);
+    if (removalRequests.current.has(key)) return;
+    removalRequests.current.add(key);
+    const scope = useUiStore.getState().selectedMailboxId;
     const nextId = getNextMessageId(messageId);
-    void moveMessages([{ messageId, mailboxId: source.mailboxId }], target.id)
-      .then(async () => {
+    void readMailData(queryClient, () => moveMessages([{ messageId, mailboxId: source.mailboxId }], target.id))
+      .then(async (result) => {
+        if (result.moved !== 1) throw new Error('邮件未能归档');
         setRemovedMessageKeys((current) => new Set(current).add(messageInstanceKey(source)));
-        selectMessage(nextId);
+        const current = useUiStore.getState();
+        if (current.selectedMailboxId === scope && current.selectedMessageId === messageId) selectMessage(nextId);
         await queryClient.invalidateQueries({ queryKey: ['messages'] });
         void queryClient.invalidateQueries({ queryKey: ['mailboxes'] });
         void queryClient.invalidateQueries({ queryKey: ['search'] });
         setRemovedMessageKeys((current) => { const next = new Set(current); next.delete(messageInstanceKey(source)); return next; });
       })
-      .catch((error) => setSyncMessage(appErrorMessage(error)));
+      .catch((error) => setSyncMessage(appErrorMessage(error)))
+      .finally(() => removalRequests.current.delete(key));
   };
 
   const deleteSelectedMessages = useCallback(
-    async (selectedMessages: Message[]) => {
+    async (selectedMessages: Message[], nextSelection: string | null = null) => {
       const uniqueMessages = Array.from(
         new Map(selectedMessages.map((message) => [messageInstanceKey(message), message])),
       ).map(([, message]) => message);
-      if (uniqueMessages.length === 0) return;
-
+      if (uniqueMessages.length === 0 || isRefreshing) return;
+      const keys = uniqueMessages.map(messageInstanceKey);
+      if (keys.some((key) => removalRequests.current.has(key))) return;
+      keys.forEach((key) => removalRequests.current.add(key));
+      const scope = useUiStore.getState().selectedMailboxId;
       try {
-        const result = await deleteMessages(
+        const result = await readMailData(queryClient, () => deleteMessages(
           uniqueMessages.map((message) => ({
             messageId: message.id,
             mailboxId: message.mailboxId,
           })),
-        );
+        ));
         if (result.deleted !== uniqueMessages.length) {
           throw new Error('部分邮件未能移至回收站');
         }
@@ -222,11 +179,9 @@ export function MailHome({
           for (const message of uniqueMessages) next.add(messageInstanceKey(message));
           return next;
         });
-        if (
-          selectedMessageId &&
-          uniqueMessages.some((message) => message.id === selectedMessageId)
-        ) {
-          selectMessage(null);
+        const current = useUiStore.getState();
+        if (current.selectedMailboxId === scope && uniqueMessages.some((message) => message.id === current.selectedMessageId)) {
+          selectMessage(nextSelection);
         }
         await queryClient.invalidateQueries({ queryKey: ['messages'] });
         void queryClient.invalidateQueries({ queryKey: ['mailboxes'] });
@@ -235,20 +190,18 @@ export function MailHome({
       } catch (error) {
         setSyncMessage(appErrorMessage(error));
         throw error;
+      } finally {
+        keys.forEach((key) => removalRequests.current.delete(key));
       }
     },
-    [messageInstanceKey, queryClient, selectMessage, selectedMessageId, setSyncMessage],
+    [isRefreshing, queryClient, selectMessage, setSyncMessage],
   );
 
   const deleteMessage = (messageId: string) => {
     const source = localMessages.find((message) => message.id === messageId);
     if (!source) return;
     const nextId = getNextMessageId(messageId);
-    void deleteSelectedMessages([source])
-      .then(() => {
-        selectMessage(nextId);
-      })
-      .catch(() => undefined);
+    void deleteSelectedMessages([source], nextId).catch(() => undefined);
   };
 
   const selectedMessage = useMemo(() => {
@@ -258,32 +211,38 @@ export function MailHome({
     return isSinglePane ? null : (localMessages[0] ?? null);
   }, [isSinglePane, localMessages, selectedMessageId]);
 
+  // Auto mark-read fires only when a message BECOMES the viewed one. Watching
+  // isRead flips instead would let it stomp the user: toggling the selected
+  // message back to unread re-triggered an auto-read that instantly reverted
+  // the toggle (the "first click always fails" bug).
+  const lastAutoReadSelection = useRef<string | null>(null);
   useEffect(() => {
-    if (!selectedMessage || selectedMessage.isRead) return;
-    const key = messageInstanceKey(selectedMessage);
-    if (readOnOpenAttempted.current.has(key)) return;
-
-    // The reader is the viewing boundary. Make the local state change here
-    // rather than when a row merely scrolls into view, and keep a durable
-    // IMAP mutation queued for the next sync.
-    readOnOpenAttempted.current.add(key);
+    if (isRefreshing || isLoading) return;
+    if (!selectedMessage) {
+      lastAutoReadSelection.current = null;
+      return;
+    }
+    const becameSelected = lastAutoReadSelection.current !== messageInstanceKey(selectedMessage);
+    lastAutoReadSelection.current = messageInstanceKey(selectedMessage);
+    if (!becameSelected || selectedMessage.isRead) return;
     void applyMutation(selectedMessage.id, { isRead: true }).catch(() => undefined);
-  }, [applyMutation, messageInstanceKey, selectedMessage]);
+  }, [applyMutation, isLoading, isRefreshing, selectedMessage]);
 
   const hydrateBody = useCallback(
     (message: Message) => {
       const key = messageInstanceKey(message);
       if (
-        (!message.bodyNeedsRefresh && (message.bodyText != null || message.bodyHtmlText != null)) ||
+        (!message.bodyNeedsRefresh && (message.bodyText != null || message.bodyHtmlText != null) && (!message.hasAttachment || message.attachments !== undefined)) ||
         fetchedBodies.current.has(key) ||
         bodyRequests.current.has(key)
       )
         return;
       bodyRequests.current.add(key);
-      setBodyLoadingKey(key);
+      setLoadingBodyKeys((current) => new Set(current).add(key));
       setBodyErrors((current) => ({ ...current, [key]: '' }));
       void fetchMessageBody({ messageId: message.id, mailboxId: message.mailboxId })
         .then((hydrated) => {
+          if (messageInstanceKey(hydrated) !== key) throw new Error('邮件正文与请求的邮件不一致');
           fetchedBodies.current.add(key);
           setHydratedMessages((current) => ({ ...current, [key]: hydrated }));
         })
@@ -292,15 +251,15 @@ export function MailHome({
         })
         .finally(() => {
           bodyRequests.current.delete(key);
-          setBodyLoadingKey((current) => (current === key ? null : current));
+          setLoadingBodyKeys((current) => { const next = new Set(current); next.delete(key); return next; });
         });
     },
-    [messageInstanceKey],
+    [],
   );
 
   useEffect(() => {
-    if (selectedMessage) hydrateBody(selectedMessage);
-  }, [hydrateBody, selectedMessage]);
+    if (selectedMessage && !isRefreshing) hydrateBody(selectedMessage);
+  }, [hydrateBody, isRefreshing, selectedMessage]);
 
   if (!hasAccounts) {
     return (
@@ -325,14 +284,17 @@ export function MailHome({
           messages={localMessages}
           selectedMessageId={selectedMessage?.id}
           onSelect={selectMessage}
-          onToggle={applyMutation}
+          onToggle={(id, mutation) => { void applyMutation(id, mutation).catch(() => undefined); }}
           onBulkMutate={applyBulkMutation}
           onBulkDelete={deleteSelectedMessages}
           onRefresh={onSync}
+          loadError={loadError}
+          onRetry={onRetry}
           isLoading={isLoading}
+          isRefreshing={isRefreshing}
         />
       </section>
-      <section className="reader-pane" aria-label="邮件阅读器">
+      <section className="reader-pane" aria-label="邮件阅读器" inert={isRefreshing || undefined}>
         {selectedMessage ? (
           <Reader
             key={messageInstanceKey(selectedMessage)}
@@ -340,7 +302,7 @@ export function MailHome({
             accountEmail={
               accounts.find((account) => account.id === selectedMessage.accountId)?.email
             }
-            bodyLoading={bodyLoadingKey === messageInstanceKey(selectedMessage)}
+            bodyLoading={loadingBodyKeys.has(messageInstanceKey(selectedMessage))}
             bodyError={bodyErrors[messageInstanceKey(selectedMessage)]}
             onRetryBody={() => hydrateBody(selectedMessage)}
             onBack={() => selectMessage(null)}

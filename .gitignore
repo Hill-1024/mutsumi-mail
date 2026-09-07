@@ -10,3 +10,5 @@ vite.config.d.ts
 *.log
 .DS_Store
 qa/
+.mimosa/
+.omo/

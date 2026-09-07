@@ -27,6 +27,17 @@ export const THEME_PALETTES: ThemePalettePreset[] = [
 
 export const DEFAULT_CUSTOM_SEED = '#3F6654';
 
+const HEX_SEED_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Guards against a corrupted persisted seed: `argbFromHex` throws on malformed input,
+ * which would blank the whole app from inside the theme effect.
+ */
+export function sanitizeSeed(seed: string | null | undefined): string {
+  if (seed && HEX_SEED_PATTERN.test(seed.trim())) return seed.trim().toUpperCase();
+  return DEFAULT_CUSTOM_SEED;
+}
+
 const token = (name: string) => `--md-sys-color-${name}`;
 const color = (value: number) => hexFromArgb(value).toUpperCase();
 
@@ -85,7 +96,7 @@ export function applyThemeTokens(seed: string, dark: boolean) {
 }
 
 export function paletteSeed(paletteId: ThemePaletteId, customSeed: string) {
-  if (paletteId === 'custom') return customSeed;
+  if (paletteId === 'custom') return sanitizeSeed(customSeed);
   return THEME_PALETTES.find((palette) => palette.id === paletteId)?.seed ?? THEME_PALETTES[0].seed;
 }
 

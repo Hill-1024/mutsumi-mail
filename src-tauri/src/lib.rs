@@ -3,10 +3,12 @@ mod app_state;
 mod application;
 mod auth;
 mod backends;
+mod background;
 mod commands;
 mod domain;
 mod dynamic_color;
 mod errors;
+mod mail_runtime;
 mod mime;
 mod providers;
 mod storage;
@@ -28,14 +30,21 @@ pub fn run() {
         .plugin(all_files_access::init())
         .plugin(dynamic_color::init());
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(
-        |app, _arguments, _working_directory| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        },
-    ));
+    let builder = builder
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
+                .args(["--background"])
+                .build(),
+        )
+        .plugin(tauri_plugin_single_instance::init(
+            |app, _arguments, _working_directory| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            },
+        ));
     let app = match builder
         .setup(|app| {
             let data_dir = app
@@ -44,21 +53,35 @@ pub fn run() {
                 .map_err(|error| Box::new(error) as Box<dyn Error>)?;
             fs::create_dir_all(&data_dir)?;
             let database_path = data_dir.join("mutsumi-mail.sqlite3");
-            let state = app_state::AppState::open(&database_path)
+            #[cfg(not(target_os = "android"))]
+            let runtime = mail_runtime::MailRuntime::open(&database_path)
                 .map_err(|error| Box::new(error) as Box<dyn Error>)?;
+            #[cfg(target_os = "android")]
+            let runtime = background::android::runtime_for_path(&database_path)
+                .map_err(|error| Box::new(error) as Box<dyn Error>)?;
+            let state = runtime.state.clone();
             let queued_outbox_ids = state
                 .database
                 .lock()
                 .map_err(|_| errors::AppError::Internal("database lock poisoned".into()))?
                 .queued_outbox_ids()?;
             app.manage(state);
+            app.manage(runtime.clone());
             tracing_subscriber::fmt()
                 .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
                 .with_target(false)
                 .try_init()
                 .ok();
             let app_handle = app.handle().clone();
-            application::realtime_sync_service::start(app_handle.clone());
+            runtime.attach(app_handle.clone());
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if let Err(error) = background::desktop::init(&app_handle) {
+                tracing::warn!(%error, "system tray unavailable; closing the window will exit");
+                // A login launch starts hidden. Keep a reachable window if the desktop cannot
+                // provide a tray, instead of leaving an invisible process with no exit control.
+                background::desktop::show(&app_handle);
+            }
+            runtime.start();
             for outbox_id in queued_outbox_ids {
                 application::compose_service::spawn_delivery(app_handle.clone(), outbox_id);
             }
@@ -109,12 +132,24 @@ pub fn run() {
             commands::reveal_attachment,
             commands::get_search_suggestions,
             commands::get_settings,
+            background::get_background_status,
+            background::set_launch_at_login,
+            background::open_background_settings,
             commands::update_settings,
             commands::clear_cache,
             commands::export_diagnostics
         ])
-        .build(tauri::generate_context!())
-    {
+        .build({
+            #[allow(unused_mut)]
+            let mut context = tauri::generate_context!();
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if std::env::args().any(|arg| arg == "--background") {
+                for window in &mut context.config_mut().app.windows {
+                    window.visible = false;
+                }
+            }
+            context
+        }) {
         Ok(app) => app,
         Err(error) => {
             eprintln!("Mutsumi Mail failed to start: {error}");
@@ -149,7 +184,20 @@ pub fn run() {
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
-            let _ = (app, event);
+            if let tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } = event
+            {
+                if label == "main" && background::desktop::keep_running(app) {
+                    if let Some(window) = app.get_webview_window("main") {
+                        if window.hide().is_ok() {
+                            api.prevent_close();
+                        }
+                    }
+                }
+            }
         }
     });
 }

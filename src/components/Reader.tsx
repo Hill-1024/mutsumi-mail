@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AttachmentInfo, Message } from '../types';
 import { Icon } from '../lib/icons';
 import { useUiStore } from '../stores/ui';
@@ -31,6 +31,10 @@ const formatFullDate = (value: string) => {
 
 export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryBody, onBack, onMutate, onArchive, onDelete }: ReaderProps) {
   const { openComposeWithDraft } = useUiStore();
+  const [entering, setEntering] = useState(() => !document.documentElement.dataset.viewTransition);
+  if (entering && document.documentElement.dataset.viewTransition) setEntering(false);
+  const previewRequest = useRef(0);
+  useEffect(() => () => { previewRequest.current += 1; }, []);
   const [attachmentStatus, setAttachmentStatus] = useState('');
   const [attachmentPreview, setAttachmentPreview] = useState<{
     name: string;
@@ -83,19 +87,18 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
   };
 
   const previewAttachment = async (attachment: AttachmentInfo) => {
+    const request = ++previewRequest.current;
     setAttachmentStatus(`正在打开 ${attachment.filename}…`);
     try {
       const payload = await downloadAttachment(attachment.id);
+      if (request !== previewRequest.current) return;
       const url = URL.createObjectURL(
         new Blob([new Uint8Array(payload.bytes)], { type: attachment.contentType }),
       );
-      setAttachmentPreview((current) => {
-        if (current) URL.revokeObjectURL(current.url);
-        return { name: attachment.filename, type: attachment.contentType, url };
-      });
+      setAttachmentPreview({ name: attachment.filename, type: attachment.contentType, url });
       setAttachmentStatus('');
     } catch (error) {
-      setAttachmentStatus(error instanceof Error ? error.message : '附件打开失败');
+      if (request === previewRequest.current) setAttachmentStatus(error instanceof Error ? error.message : '附件打开失败');
     }
   };
 
@@ -141,7 +144,9 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
   };
 
   return (
-    <article className="reader">
+    <article className={`reader ${entering ? 'is-entering' : ''}`} onAnimationEnd={(event) => {
+      if (event.target === event.currentTarget) setEntering(false);
+    }}>
       <div className="reader-toolbar">
         <button className="reader-tool reader-back" onClick={onBack} aria-label="返回列表" title="返回列表 (Esc)">
           <Icon name="back" size={20} />
@@ -194,7 +199,7 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
 
         <div className={`reader-body ${htmlDocument ? 'is-html' : ''}`}>
           {htmlDocument ? (
-            <iframe key={`${message.id}:${message.bodyNeedsRefresh ? 'cached' : 'original'}`} className="reader-html-body" title="邮件正文" srcDoc={htmlDocument} sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" />
+            <iframe className="reader-html-body" title="邮件正文" srcDoc={htmlDocument} sandbox="allow-popups allow-popups-to-escape-sandbox" referrerPolicy="no-referrer" />
           ) : readableBody.split('\n').map((paragraph, index) =>
             paragraph.trim() ? (
               <p key={`${message.id}-${index}`}>{paragraph}</p>
@@ -233,15 +238,30 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
         )}
 
         <div className="reader-actions" aria-label="快捷操作">
-          <button className="outlined-action" onClick={handleReply} title="回复此邮件">
+          <button
+            className="outlined-action"
+            onClick={handleReply}
+            disabled={bodyLoading}
+            title={bodyLoading ? '正在下载正文，请稍候' : '回复此邮件'}
+          >
             <Icon name="reply" size={18} />
             <span>回复</span>
           </button>
-          <button className="outlined-action" onClick={handleReplyAll} title="回复所有收件人">
+          <button
+            className="outlined-action"
+            onClick={handleReplyAll}
+            disabled={bodyLoading}
+            title={bodyLoading ? '正在下载正文，请稍候' : '回复所有收件人'}
+          >
             <Icon name="replyAll" size={18} />
             <span>回复全部</span>
           </button>
-          <button className="outlined-action" onClick={handleForward} title="转发此邮件">
+          <button
+            className="outlined-action"
+            onClick={handleForward}
+            disabled={bodyLoading}
+            title={bodyLoading ? '正在下载正文，请稍候' : '转发此邮件'}
+          >
             <Icon name="forward" size={18} />
             <span>转发</span>
           </button>
@@ -251,7 +271,7 @@ export function Reader({ message, accountEmail, bodyLoading, bodyError, onRetryB
             <div className="attachment-preview">
               <header>
                 <strong>{attachmentPreview.name}</strong>
-                <button type="button" onClick={() => setAttachmentPreview(null)} aria-label="关闭附件预览">
+                <button type="button" onClick={() => { previewRequest.current += 1; setAttachmentPreview(null); }} aria-label="关闭附件预览">
                   <Icon name="close" size={20} />
                 </button>
               </header>

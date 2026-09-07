@@ -97,13 +97,22 @@
 
   /* ------------------------------------------------------------------------
      MD3 MOTION & EASING
+     Durations follow the M3 range ladder (short 150 / medium 250 / long 400 /
+     extra-long 550). `--motion-spring` is the one deliberate departure: a
+     critically-damped-ish overshoot curve reserved for icon/state pops, the
+     way iOS springs small symbols instead of sliding them.
      ------------------------------------------------------------------------ */
   --md-sys-motion-easing-emphasized: cubic-bezier(0.2, 0, 0, 1);
-  --md-sys-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --md-sys-motion-easing-emphasized-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --md-sys-motion-easing-emphasized-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
   --md-sys-motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --md-sys-motion-easing-standard-accelerate: cubic-bezier(0.3, 0, 1, 1);
+  --md-sys-motion-easing-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --motion-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
   --md-sys-motion-duration-short: 150ms;
   --md-sys-motion-duration-medium: 250ms;
   --md-sys-motion-duration-long: 400ms;
+  --md-sys-motion-duration-extra-long: 550ms;
 
   /* ------------------------------------------------------------------------
      MD3 TYPE SCALE (sizes/weights; see DESIGN.md section 3)
@@ -300,6 +309,12 @@ textarea:focus-visible {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--md-sys-color-outline);
+}
+
+/* Text selection follows the active tonal palette instead of UA default blue. */
+::selection {
+  background: color-mix(in srgb, var(--md-sys-color-primary) 32%, transparent);
+  color: var(--md-sys-color-on-surface);
 }
 
 /* ==========================================================================
@@ -784,6 +799,43 @@ textarea:focus-visible {
   flex-direction: column;
 }
 
+/* navigation.ts commits route and selection together. Explicit stacking keeps
+   the old opaque snapshot above the new page while it fades away; translucent
+   app surfaces never blend against an uncovered background. */
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root) {
+    z-index: 2;
+    animation: vt-page-out 240ms var(--md-sys-motion-easing-standard-accelerate) both;
+  }
+
+  ::view-transition-new(root) {
+    z-index: 1;
+    animation: none;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    mix-blend-mode: normal;
+  }
+}
+
+@keyframes vt-page-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* The persistent hero uses its region for expansion. Route snapshots already
+   provide its entrance; child opacity animations would capture it transparent. */
+.mutsumi-hero.no-entrance,
+.mutsumi-hero.no-entrance .mutsumi-hero-art,
+.mutsumi-hero.no-entrance .mutsumi-hero-copy > * {
+  animation: none;
+}
+
 .startup-state {
   display: flex;
   width: 100%;
@@ -816,6 +868,36 @@ textarea:focus-visible {
    Grammar borrowed from MikuBox: character banner card + time greeting.
    Every color derives from tokens (DESIGN.md section 7); both themes valid.
    ========================================================================== */
+/* Collapse region: animates height smoothly when a message opens on the same
+   route. Route changes unmount the whole region inside the View Transition
+   callback instead, so snapshots never contain a half-collapsed gap. */
+.mutsumi-hero-region {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 240ms var(--md-sys-motion-easing-emphasized);
+}
+
+.mutsumi-hero-region.is-leaving {
+  grid-template-rows: 0fr;
+}
+
+/* The snapshot owns route motion. Nested entrance/layout animations would
+   capture a transparent reader or an intermediate hero height. */
+:root[data-view-transition] .reader,
+:root[data-view-transition] .empty-reader {
+  animation: none;
+}
+
+:root[data-view-transition] .mutsumi-hero-region {
+  transition: none;
+}
+
+.mutsumi-hero-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .mutsumi-hero {
   position: relative;
   flex: 0 0 auto;
@@ -837,6 +919,221 @@ textarea:focus-visible {
       var(--md-sys-color-surface-container-low) 100%
     );
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-outline-variant) 45%, transparent);
+  animation: hero-enter var(--md-sys-motion-duration-long) var(--md-sys-motion-easing-emphasized);
+}
+
+/* While the reader takes over, the hero settles out instead of the layout snapping. */
+.mutsumi-hero.is-leaving {
+  pointer-events: none;
+  animation: hero-leave var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-standard)
+    forwards;
+}
+
+@keyframes hero-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes hero-leave {
+  to {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+}
+
+/* Mutsumi hero ambience — every layer derives from tokens and stays quiet enough
+   to keep the hero decorative (DESIGN.md section 7). The entrance drifts the
+   artwork in and staggers the copy; the glow pans and the artwork breathes on
+   independent `scale`/`translate` properties so the motions compose. */
+.mutsumi-hero::before {
+  content: '';
+  position: absolute;
+  inset: -32%;
+  background: radial-gradient(
+    42% 58% at 28% 18%,
+    color-mix(in srgb, var(--md-sys-color-primary) 18%, transparent) 0%,
+    transparent 70%
+  );
+  animation: mutsumi-glow-pan 16s var(--md-sys-motion-easing-standard) infinite alternate;
+  pointer-events: none;
+}
+
+@keyframes mutsumi-glow-pan {
+  from {
+    transform: translate3d(-3%, -2%, 0);
+  }
+  to {
+    transform: translate3d(4%, 3%, 0);
+  }
+}
+
+.mutsumi-hero-art {
+  animation:
+    mutsumi-art-in var(--md-sys-motion-duration-extra-long)
+      var(--md-sys-motion-easing-emphasized) both,
+    mutsumi-art-breathe 9s ease-in-out 700ms infinite alternate;
+  transform-origin: 72% 96%;
+}
+
+@keyframes mutsumi-art-in {
+  from {
+    opacity: 0;
+    translate: 28px 0;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+@keyframes mutsumi-art-breathe {
+  from {
+    scale: 1;
+  }
+  to {
+    scale: 1.012;
+  }
+}
+
+.mutsumi-hero-copy > * {
+  animation: mutsumi-copy-in var(--md-sys-motion-duration-long)
+    var(--md-sys-motion-easing-emphasized) both;
+}
+
+.mutsumi-hero-copy > :nth-child(2) {
+  animation-delay: 70ms;
+}
+
+.mutsumi-hero-copy > :nth-child(3) {
+  animation-delay: 140ms;
+}
+
+@keyframes mutsumi-copy-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* A quiet character watermark anchors the empty states in Mutsumi mode. */
+[data-special-theme='mutsumi'] .empty-reader,
+[data-special-theme='mutsumi'] .account-empty-state {
+  position: relative;
+  overflow: hidden;
+}
+
+[data-special-theme='mutsumi'] .empty-reader::after,
+[data-special-theme='mutsumi'] .account-empty-state::after {
+  content: '';
+  position: absolute;
+  right: -18px;
+  bottom: -30px;
+  width: min(300px, 42%);
+  aspect-ratio: 1200 / 1439;
+  background: url('/themes/mutsumi/mutsumi-hero.webp') right bottom / contain no-repeat;
+  opacity: 0.1;
+  -webkit-mask-image: linear-gradient(315deg, #000 28%, transparent 76%);
+  mask-image: linear-gradient(315deg, #000 28%, transparent 76%);
+  pointer-events: none;
+}
+
+/* Mutsumi compose button carries a hairline primary ring, token-derived only. */
+[data-special-theme='mutsumi'] .compose-button {
+  box-shadow: var(--md-sys-elevation-1),
+    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 34%, transparent);
+}
+
+[data-special-theme='mutsumi'] .compose-button:hover {
+  box-shadow: var(--md-sys-elevation-2),
+    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 48%, transparent);
+}
+
+/* ==========================================================================
+   MUTSUMI AMBIENCE — wallpaper + frosted surfaces (mutsumi.moe grammar)
+   A large, heavily blurred character layer sits behind the app; the major
+   surfaces go translucent so light glows through, Mizuki-style. Zero cost in
+   other themes: the layer is display:none and surfaces stay opaque.
+   ========================================================================== */
+.mutsumi-wallpaper {
+  display: none;
+}
+
+.app-shell[data-special-theme='mutsumi'] {
+  background: transparent;
+}
+
+.app-shell[data-special-theme='mutsumi'] .mutsumi-wallpaper {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      46% 40% at 16% -4%,
+      color-mix(in srgb, var(--md-sys-color-primary) 16%, transparent),
+      transparent 72%
+    ),
+    url('/themes/mutsumi/mutsumi-hero.webp') right -6% bottom -10% / auto 116% no-repeat;
+  opacity: 0.12;
+  filter: blur(28px) saturate(1.06);
+  /* Oversize so the blur never samples transparent edges. */
+  transform: scale(1.14);
+  transform-origin: 60% 60%;
+}
+
+:root[data-theme='light'] .app-shell[data-special-theme='mutsumi'] .mutsumi-wallpaper {
+  opacity: 0.09;
+}
+
+.app-shell[data-special-theme='mutsumi'] .workspace {
+  background: transparent;
+}
+
+.app-shell[data-special-theme='mutsumi'] .topbar {
+  background: color-mix(in srgb, var(--md-sys-color-surface) 66%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.app-shell[data-special-theme='mutsumi'] .sidebar {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.app-shell[data-special-theme='mutsumi'] .list-pane {
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-lowest) 80%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.app-shell[data-special-theme='mutsumi'] .reader-pane {
+  background: color-mix(in srgb, var(--md-sys-color-surface) 72%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.app-shell[data-special-theme='mutsumi'] .mobile-bottom-nav {
+  background: color-mix(in srgb, var(--md-sys-color-surface-container) 78%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.app-shell[data-special-theme='mutsumi'] .mobile-nav-drawer {
+  background: color-mix(in srgb, var(--md-sys-color-surface-container-low) 88%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
 }
 
 .mutsumi-hero-art {
@@ -888,7 +1185,8 @@ textarea:focus-visible {
   color: color-mix(in srgb, var(--md-sys-color-on-primary-container) 62%, transparent);
 }
 
-/* Sidebar carries a quiet same-family tint in mutsumi mode */
+/* Sidebar carries a quiet same-family tint in mutsumi mode; translucent base so
+   the ambient wallpaper glows through the blur. */
 .app-shell[data-special-theme='mutsumi'] .sidebar {
   background:
     radial-gradient(
@@ -896,7 +1194,7 @@ textarea:focus-visible {
       color-mix(in srgb, var(--md-sys-color-primary-container) 30%, transparent) 0%,
       transparent 58%
     ),
-    var(--md-sys-color-surface-container-low);
+    color-mix(in srgb, var(--md-sys-color-surface-container-low) 82%, transparent);
 }
 
 /* ==========================================================================
@@ -921,6 +1219,23 @@ textarea:focus-visible {
   min-width: 0;
   overflow: hidden;
   background: var(--md-sys-color-surface);
+}
+
+/* Reader owns a one-shot entrance state. Removing transition suppression must
+   never restart an animation on an already visible message. */
+.reader.is-entering {
+  animation: reader-enter var(--md-sys-motion-duration-long) var(--md-sys-motion-easing-emphasized);
+}
+
+@keyframes reader-enter {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* ==========================================================================
@@ -1056,6 +1371,13 @@ textarea:focus-visible {
   flex: 1;
   overflow: auto;
   padding: 0 8px 12px;
+  transition: opacity var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+}
+
+/* While placeholder (previous folder) data is on screen during a refetch, keep the
+   list visible but clearly provisional instead of flashing an empty state. */
+.virtual-list.is-refreshing {
+  opacity: 0.55;
 }
 
 /* MD3 List Item */
@@ -2188,6 +2510,11 @@ textarea:focus-visible {
   line-height: 1.45;
 }
 
+.background-settings .outlined-action {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 /* MD3 Segmented Buttons */
 .segmented-control {
   display: flex;
@@ -2411,12 +2738,24 @@ textarea:focus-visible {
   animation: scrim-fade 200ms var(--md-sys-motion-easing-standard);
 }
 
+/* Parents keep exiting dialogs mounted briefly; CSS plays the way out. */
+.modal-scrim.is-exiting {
+  pointer-events: none;
+  animation: scrim-fade-out 180ms var(--md-sys-motion-easing-standard) forwards;
+}
+
 @keyframes scrim-fade {
   from {
     opacity: 0;
   }
   to {
     opacity: 1;
+  }
+}
+
+@keyframes scrim-fade-out {
+  to {
+    opacity: 0;
   }
 }
 
@@ -2428,17 +2767,29 @@ textarea:focus-visible {
   border-radius: var(--md-sys-shape-corner-extra-large);
   background: var(--md-sys-color-surface-container-high);
   box-shadow: var(--md-sys-elevation-4);
-  animation: dialog-pop 250ms var(--md-sys-motion-easing-decelerate);
+  animation: dialog-pop 280ms var(--md-sys-motion-easing-emphasized-decelerate);
+}
+
+.compose-dialog.is-exiting,
+.wizard-dialog.is-exiting {
+  animation: dialog-out 180ms var(--md-sys-motion-easing-standard-accelerate) forwards;
 }
 
 @keyframes dialog-pop {
   from {
     opacity: 0;
-    transform: scale(0.96) translateY(10px);
+    transform: scale(0.94) translateY(12px);
   }
   to {
     opacity: 1;
     transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes dialog-out {
+  to {
+    opacity: 0;
+    transform: scale(0.96) translateY(8px);
   }
 }
 
@@ -3077,6 +3428,12 @@ textarea:focus-visible {
     inset: 0;
     display: block;
     background: rgba(0, 0, 0, 0.55);
+    animation: scrim-fade 200ms var(--md-sys-motion-easing-standard);
+  }
+  .mobile-nav-scrim.is-exiting {
+    pointer-events: none;
+    /* Matches drawer-out so both finish before the parent unmounts the pair. */
+    animation: scrim-fade-out 240ms var(--md-sys-motion-easing-standard) forwards;
   }
   .mobile-nav-drawer {
     display: flex;
@@ -3088,6 +3445,11 @@ textarea:focus-visible {
     border-radius: 0 var(--md-sys-shape-corner-large) var(--md-sys-shape-corner-large) 0;
     background: var(--md-sys-color-surface-container-low);
     box-shadow: var(--md-sys-elevation-3);
+    animation: drawer-in 280ms var(--md-sys-motion-easing-emphasized);
+  }
+  .mobile-nav-drawer.is-exiting {
+    pointer-events: none;
+    animation: drawer-out 240ms var(--md-sys-motion-easing-standard-accelerate) forwards;
   }
   .mobile-drawer-header {
     display: flex;
@@ -3412,6 +3774,7 @@ textarea:focus-visible {
     color: var(--md-sys-color-on-primary-container);
     box-shadow: var(--md-sys-elevation-3);
     transition: transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized);
+    animation: fab-spring-in 360ms var(--motion-spring);
   }
   .mobile-compose-fab:active {
     transform: scale(0.96);
@@ -3543,4 +3906,113 @@ iframe.reader-html-body {
   border: 0;
   background: white;
   color-scheme: light;
+}
+
+/* ==========================================================================
+   MOTION — STATE-CHANGE POPS
+   Icons replay their entrance via React keys on real state toggles only, so
+   virtualized rows never re-pop while scrolling. The overshoot curve gives
+   the small "settle" feel of iOS symbol transitions on top of MD3 tokens.
+   ========================================================================== */
+
+@keyframes icon-spring-in {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes icon-spring-star {
+  0% {
+    transform: scale(0.4) rotate(-24deg);
+  }
+  55% {
+    transform: scale(1.22) rotate(10deg);
+  }
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+}
+
+@keyframes nav-icon-pop {
+  0% {
+    transform: scale(0.72);
+  }
+  60% {
+    transform: scale(1.14);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes theme-icon-swap {
+  0% {
+    opacity: 0;
+    transform: rotate(-110deg) scale(0.5);
+  }
+  100% {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
+}
+
+@keyframes fab-spring-in {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes status-pulse-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.45);
+    opacity: 0.55;
+  }
+}
+
+.icon-spring-in {
+  animation: icon-spring-in 320ms var(--motion-spring);
+}
+
+.icon-spring-star {
+  transform-origin: center;
+  animation: icon-spring-star 380ms var(--motion-spring);
+}
+
+/* Filled icon lands with a soft spring when a nav destination becomes active. */
+.nav-item.is-active svg,
+.nav-item[aria-current='page'] svg,
+.mobile-bottom-item.is-active svg {
+  animation: nav-icon-pop 380ms var(--motion-spring);
+}
+
+.theme-swap-icon {
+  transform-origin: center;
+  animation: theme-icon-swap 420ms var(--motion-spring);
+}
+
+.icon-button.is-busy svg {
+  animation: m3-spin 800ms linear infinite;
+}
+
+.sync-chip.is-syncing .status-pulse {
+  animation: status-pulse-breathe 1.6s var(--md-sys-motion-easing-standard) infinite;
 }

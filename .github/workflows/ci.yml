@@ -108,3 +108,40 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
       - run: cargo check --locked
         working-directory: src-tauri
+
+  android-background:
+    name: Android background service build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - name: Configure Android toolchain
+        shell: bash
+        run: |
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.0.12077973"
+          mail_ndk="$ANDROID_SDK_ROOT/ndk/27.0.12077973"
+          mail_tools="$mail_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            printf 'ANDROID_NDK_HOME=%s\n' "$mail_ndk"
+            printf 'NDK_HOME=%s\n' "$mail_ndk"
+            printf 'CC_aarch64_linux_android=%s/aarch64-linux-android24-clang\n' "$mail_tools"
+            printf 'AR_aarch64_linux_android=%s/llvm-ar\n' "$mail_tools"
+            printf 'RANLIB_aarch64_linux_android=%s/llvm-ranlib\n' "$mail_tools"
+          } >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          targets: aarch64-linux-android
+      - run: pnpm install --frozen-lockfile
+      - name: Build JNI engine, services and manifest together
+        run: pnpm tauri android build --ci --debug --apk --target aarch64

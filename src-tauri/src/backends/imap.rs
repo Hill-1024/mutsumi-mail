@@ -24,6 +24,14 @@ use crate::domain::capabilities::ProviderCapabilities;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+// Renew IDLE once the remaining wait drops below this floor instead of racing a read
+// against a near-zero timeout. Deliberately tiny: a pending tagged completion that is
+// already in the buffer must still be consumed normally.
+const IDLE_RENEWAL_FLOOR: Duration = Duration::from_millis(250);
+// Hard outer bound for a single on-demand body download. Regular sync batches are capped
+// by MAX_BATCH_BODY_BYTES; this only guards against a pathological or hostile server
+// streaming an unbounded literal into memory when one message is opened.
+const MAX_SINGLE_BODY_BYTES: u64 = 256 * 1024 * 1024;
 const GREETING_LIMIT: usize = 8 * 1024;
 const CONTROL_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 const MAILBOX_INDEX_RESPONSE_LIMIT: usize = 32 * 1024 * 1024;
@@ -37,6 +45,7 @@ const MESSAGE_METADATA_ITEMS: &str = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.P
 
 pub struct ImapIncomingBackend {
     pub config: IncomingConfig,
+    fetch_bodies: bool,
     // One backend instance represents one account operation. Keeping its authenticated
     // session alive avoids a burst of LOGIN commands while a sync walks every mailbox;
     // some providers throttle those reconnects and then leave later UID commands hanging.
@@ -53,7 +62,17 @@ impl ImapIncomingBackend {
     pub fn new(config: IncomingConfig) -> Self {
         Self {
             config,
+            fetch_bodies: true,
             session: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Publish background arrivals from headers immediately. The reader fetches the original
+    /// body on demand; an explicit full sync still preloads bodies for offline reading.
+    pub fn metadata_only(config: IncomingConfig) -> Self {
+        Self {
+            fetch_bodies: false,
+            ..Self::new(config)
         }
     }
 
@@ -166,7 +185,14 @@ impl IncomingMailBackend for ImapIncomingBackend {
         let mut cached = self.authenticated_session(secret).await?;
         let result = match cached.as_mut() {
             Some(cached) => {
-                fetch_messages_on_session(&mut cached.session, mailbox, since_uid, limit).await
+                fetch_messages_on_session(
+                    &mut cached.session,
+                    mailbox,
+                    since_uid,
+                    limit,
+                    self.fetch_bodies,
+                )
+                .await
             }
             None => Err(IncomingError::Protocol(
                 "IMAP session cache was unexpectedly empty".into(),
@@ -410,7 +436,12 @@ where
                     information,
                     ..
                 } => {
-                    return Err(IncomingError::Protocol(
+                    // An unsolicited BYE means the server is tearing the session down; the
+                    // connection is disposable and the command never completed, so treat this
+                    // like any other transport loss instead of an unrecoverable protocol
+                    // mismatch (which would permanently disable realtime sync and mark queued
+                    // offline operations as conflicted).
+                    return Err(IncomingError::Network(
                         information
                             .map(|value| value.into_owned())
                             .unwrap_or_else(|| "IMAP server closed the session".into()),
@@ -491,12 +522,19 @@ where
         let idle_deadline = Instant::now() + max_wait;
         loop {
             let remaining = idle_deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            // Renew on a small floor instead of exactly zero: a keepalive that arrives when
+            // only a sliver of the deadline remains would otherwise enter a near-zero read
+            // timeout and surface as a spurious "timed out" error instead of a clean renewal.
+            if remaining <= IDLE_RENEWAL_FLOOR {
                 return self.finish_idle(&tag, false).await;
             }
-            let (response, _) = timeout(remaining, self.read_response(CONTROL_RESPONSE_LIMIT))
-                .await
-                .map_err(|_| IncomingError::Network("IMAP IDLE response timed out".into()))??;
+            let (response, _) =
+                match timeout(remaining, self.read_response(CONTROL_RESPONSE_LIMIT)).await {
+                    Ok(result) => result?,
+                    // No response is expected on a quiet mailbox. Finish the handshake and reuse
+                    // this selected connection, including any untagged changes delivered at DONE.
+                    Err(_) => return self.finish_idle(&tag, false).await,
+                };
             match response {
                 Response::Done {
                     tag: response_tag,
@@ -813,7 +851,11 @@ where
                 .await
                 .map_err(|error| IncomingError::Network(error.to_string()))?;
             if read == 0 {
-                return Err(IncomingError::Protocol(
+                // A clean EOF is transport loss (stale connection, NAT timeout, server
+                // restart), not a protocol violation. The IDLE path already classifies the
+                // same condition as retryable network loss; keeping both consistent prevents
+                // a dropped socket from being treated as a terminal protocol failure.
+                return Err(IncomingError::Network(
                     "IMAP connection ended before the tagged command response".into(),
                 ));
             }
@@ -1342,6 +1384,7 @@ async fn fetch_messages_on_session<S>(
     mailbox: &str,
     since_uid: Option<u32>,
     limit: u32,
+    fetch_bodies: bool,
 ) -> Result<IncomingMailboxSnapshot, IncomingError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Debug + Send,
@@ -1423,10 +1466,17 @@ where
     }
     messages.sort_by_key(|message| std::cmp::Reverse(message.uid));
 
-    let mut body_budget = MAX_BATCH_BODY_BYTES;
+    let mut body_budget = if fetch_bodies {
+        MAX_BATCH_BODY_BYTES
+    } else {
+        0
+    };
     let body_uids = messages
         .iter()
         .filter_map(|message| {
+            if !fetch_bodies {
+                return None;
+            }
             let size = u64::from(message.size_bytes?);
             // Initial sync stays metadata-first for large messages. The reader can fetch one
             // selected message on demand without making background sync allocate
@@ -1520,7 +1570,7 @@ where
     let body_result = session
         .execute(
             &format!("UID FETCH {uid} (UID BODY.PEEK[])"),
-            usize::MAX,
+            usize::try_from(MAX_SINGLE_BODY_BYTES + 2 * 1024 * 1024).unwrap_or(usize::MAX),
             false,
         )
         .await?;
@@ -2094,6 +2144,7 @@ mod tests {
     #[tokio::test]
     async fn login_requires_matching_tagged_ok() {
         let mut missing = ImapSession::new(MockStream::new(Vec::new()));
+        // An empty stream is a transport loss (clean EOF), classified as Network.
         assert!(matches!(
             missing
                 .execute(
@@ -2102,7 +2153,7 @@ mod tests {
                     true
                 )
                 .await,
-            Err(IncomingError::Protocol(_))
+            Err(IncomingError::Network(_))
         ));
 
         let mut rejected = ImapSession::new(MockStream::new(
@@ -2123,11 +2174,12 @@ mod tests {
     #[tokio::test]
     async fn every_command_requires_its_own_tagged_ok() {
         let mut missing_starttls = ImapSession::new(MockStream::new(Vec::new()));
+        // Clean EOF before STARTTLS ever completes is transport loss, not a protocol error.
         assert!(matches!(
             missing_starttls
                 .execute("STARTTLS", CONTROL_RESPONSE_LIMIT, false)
                 .await,
-            Err(IncomingError::Protocol(_))
+            Err(IncomingError::Network(_))
         ));
 
         let mut rejected_starttls =
@@ -2141,9 +2193,10 @@ mod tests {
 
         let mut missing_capability =
             ImapSession::new(MockStream::new(b"* CAPABILITY IMAP4rev1 IDLE\r\n".to_vec()));
+        // Untagged CAPABILITY arrives, then the socket ends: transport loss (Network).
         assert!(matches!(
             read_capabilities(&mut missing_capability).await,
-            Err(IncomingError::Protocol(_))
+            Err(IncomingError::Network(_))
         ));
 
         let mut wrong_tag =
@@ -2187,6 +2240,106 @@ mod tests {
         let commands = String::from_utf8(writes.lock().expect("mock output lock").clone())
             .expect("utf-8 commands");
         assert_eq!(commands, "A0001 IDLE\r\n");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_idle_renews_cleanly_and_reuses_the_selected_connection() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        let peer = tokio::spawn(async move {
+            let mut command = [0_u8; 12];
+            server.read_exact(&mut command).await.expect("first IDLE");
+            assert_eq!(&command, b"A0001 IDLE\r\n");
+            server
+                .write_all(b"+ idling\r\n")
+                .await
+                .expect("continuation");
+            let mut done = [0_u8; 6];
+            // A quiet socket must receive DONE at the renewal deadline instead of failing.
+            server.read_exact(&mut done).await.expect("renewal DONE");
+            assert_eq!(&done, b"DONE\r\n");
+            server
+                .write_all(b"A0001 OK done\r\n")
+                .await
+                .expect("completion");
+            server.read_exact(&mut command).await.expect("second IDLE");
+            assert_eq!(&command, b"A0002 IDLE\r\n");
+            // Mail can arrive before continuation or while terminating IDLE.
+            server
+                .write_all(b"* 3 EXISTS\r\n+ idling\r\n")
+                .await
+                .expect("arrival");
+            server.read_exact(&mut done).await.expect("change DONE");
+            assert_eq!(&done, b"DONE\r\n");
+            server
+                .write_all(b"* 4 EXISTS\r\nA0002 OK done\r\n")
+                .await
+                .expect("completion");
+        });
+        let mut session = ImapSession::new(client);
+        assert!(!session
+            .idle_until_change(Duration::from_secs(60))
+            .await
+            .expect("quiet renewal"));
+        assert!(session
+            .idle_until_change(Duration::from_secs(60))
+            .await
+            .expect("second IDLE arrival"));
+        peer.await.expect("peer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_preserves_arrival_delivered_only_at_renewal_completion() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        let peer = tokio::spawn(async move {
+            let mut command = [0_u8; 12];
+            server.read_exact(&mut command).await.expect("IDLE");
+            server
+                .write_all(b"+ idling\r\n")
+                .await
+                .expect("continuation");
+            let mut done = [0_u8; 6];
+            server.read_exact(&mut done).await.expect("DONE");
+            assert_eq!(&done, b"DONE\r\n");
+            server
+                .write_all(b"* 9 EXISTS\r\nA0001 OK done\r\n")
+                .await
+                .expect("arrival at DONE");
+        });
+        let mut session = ImapSession::new(client);
+        assert!(session
+            .idle_until_change(Duration::from_secs(60))
+            .await
+            .expect("renewal arrival"));
+        peer.await.expect("peer");
+    }
+
+    #[tokio::test]
+    async fn realtime_fetch_commits_headers_without_waiting_for_large_message_bodies() {
+        let headers = b"From: sender@example.com\r\nSubject: New mail\r\n\r\n";
+        let mut wire = format!(
+            "* 1 EXISTS\r\n* OK [UIDVALIDITY 44] valid\r\nA0001 OK examined\r\n\
+             * SEARCH 42\r\nA0002 OK unread\r\n* SEARCH 42\r\nA0003 OK new\r\n\
+             * 1 FETCH (UID 42 FLAGS () RFC822.SIZE 20000000 BODY[HEADER] {{{}}}\r\n",
+            headers.len()
+        )
+        .into_bytes();
+        wire.extend_from_slice(headers);
+        wire.extend_from_slice(b")\r\nA0004 OK headers\r\n");
+        let stream = MockStream::new(wire);
+        let writes = Arc::clone(&stream.output);
+        let mut session = ImapSession::new(stream);
+        let snapshot = fetch_messages_on_session(&mut session, "INBOX", Some(41), 250, false)
+            .await
+            .expect("metadata refresh");
+        assert_eq!(snapshot.messages.len(), 1);
+        assert_eq!(snapshot.messages[0].uid, 42);
+        assert!(snapshot.messages[0].raw_rfc822.is_none());
+        assert_eq!(snapshot.unread_count, 1);
+        let commands = String::from_utf8(writes.lock().expect("writes").clone()).expect("utf8");
+        assert!(
+            !commands.contains("BODY.PEEK[]"),
+            "body download must not block arrival"
+        );
     }
 
     #[tokio::test]
@@ -2238,7 +2391,7 @@ mod tests {
         assert_eq!(mailboxes[0].special_role.as_deref(), Some("inbox"));
         assert_eq!(mailboxes[1].special_role.as_deref(), Some("sent"));
 
-        let snapshot = fetch_messages_on_session(&mut session, "INBOX", None, 1)
+        let snapshot = fetch_messages_on_session(&mut session, "INBOX", None, 1, true)
             .await
             .expect("snapshot");
         assert_eq!(snapshot.uid_validity, Some(44));
@@ -2275,7 +2428,7 @@ mod tests {
                           A0004 OK fetch\r\n"
             .to_vec();
         let mut session = ImapSession::new(MockStream::new(responses));
-        let snapshot = fetch_messages_on_session(&mut session, "INBOX", Some(10), 2)
+        let snapshot = fetch_messages_on_session(&mut session, "INBOX", Some(10), 2, true)
             .await
             .expect("incremental snapshot");
         let mut uids = snapshot
@@ -2301,7 +2454,7 @@ mod tests {
                               A0004 OK fetch\r\n"
             .to_vec();
         let mut session = ImapSession::new(MockStream::new(raced_arrival));
-        let snapshot = fetch_messages_on_session(&mut session, "INBOX", None, 1)
+        let snapshot = fetch_messages_on_session(&mut session, "INBOX", None, 1, true)
             .await
             .expect("truncated full snapshot");
         assert!(!snapshot.coverage_complete);
@@ -2317,7 +2470,7 @@ mod tests {
                          A0004 OK fetch\r\n"
             .to_vec();
         let mut session = ImapSession::new(MockStream::new(complete));
-        let snapshot = fetch_messages_on_session(&mut session, "INBOX", None, 2)
+        let snapshot = fetch_messages_on_session(&mut session, "INBOX", None, 2, true)
             .await
             .expect("complete full snapshot");
         assert!(snapshot.coverage_complete);
@@ -2334,7 +2487,7 @@ mod tests {
             .to_vec();
         let mut session = ImapSession::new(MockStream::new(omitted_uid));
         assert!(matches!(
-            fetch_messages_on_session(&mut session, "INBOX", None, 2).await,
+            fetch_messages_on_session(&mut session, "INBOX", None, 2, true).await,
             Err(IncomingError::Protocol(_))
         ));
     }
@@ -2651,9 +2804,11 @@ mod tests {
 
         let mut missing_completion =
             ImapSession::new(MockStream::new(b"+ ready for literal\r\n".to_vec()));
+        // The literal was written but the connection ended before the tagged completion:
+        // transport loss (Network), and the result must never be mistaken for success.
         assert!(matches!(
             append_message_on_session(&mut missing_completion, "Sent", raw, false).await,
-            Err(IncomingError::Protocol(_))
+            Err(IncomingError::Network(_))
         ));
 
         let stream = MockStream::new(b"A0001 OK no continuation\r\n".to_vec());

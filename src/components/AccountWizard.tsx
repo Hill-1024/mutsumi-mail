@@ -69,10 +69,16 @@ export function AccountWizard({
   onClose,
   onSaved,
   canClose = true,
+  closing = false,
+  onAnimationEnd,
 }: {
   onClose: () => void;
   onSaved: (account: Account) => void;
   canClose?: boolean;
+  /** True while the parent plays the exit animation; input is disabled via CSS. */
+  closing?: boolean;
+  /** Released by the parent when the scrim's exit animation finishes. */
+  onAnimationEnd?: (event: { target: EventTarget | null; currentTarget: Element }) => void;
 }) {
   const dialogRef = useDialogFocus<HTMLElement>();
   const [step, setStep] = useState<1 | 2>(1);
@@ -230,13 +236,14 @@ export function AccountWizard({
 
   return (
     <div
-      className="modal-scrim"
+      className={`modal-scrim ${closing ? 'is-exiting' : ''}`}
       role="presentation"
+      onAnimationEnd={onAnimationEnd}
       onMouseDown={(event) => {
         if (canClose && !isVerifying && event.target === event.currentTarget) onClose();
       }}
     >
-      <section ref={dialogRef} className="wizard-dialog" role="dialog" aria-modal="true" aria-labelledby="wizard-title" aria-busy={isVerifying}>
+      <section ref={dialogRef} className={`wizard-dialog ${closing ? 'is-exiting' : ''}`} role="dialog" aria-modal="true" aria-labelledby="wizard-title" aria-busy={isVerifying}>
         <header className="wizard-header">
           <h2 id="wizard-title">添加邮箱</h2>
           {canClose && (

@@ -257,8 +257,12 @@ pub fn search_messages(
 }
 
 #[tauri::command]
-pub fn get_message(state: State<'_, AppState>, message_id: String) -> Result<Message, AppErrorDto> {
-    message_service::get_message(&state, message_id).map_err(Into::into)
+pub fn get_message(
+    state: State<'_, AppState>,
+    message_id: String,
+    mailbox_id: Option<String>,
+) -> Result<Message, AppErrorDto> {
+    message_service::get_message(&state, message_id, mailbox_id).map_err(Into::into)
 }
 
 #[tauri::command]
@@ -616,11 +620,16 @@ pub fn list_thread(
     state: State<'_, AppState>,
     thread_id: String,
 ) -> Result<Vec<Message>, AppErrorDto> {
-    let messages = message_service::list_messages(&state, None, 500).map_err(AppErrorDto::from)?;
-    Ok(messages
-        .into_iter()
-        .filter(|message| message.thread_id == thread_id)
-        .collect())
+    state
+        .database
+        .lock()
+        .map_err(|_| {
+            AppErrorDto::from(crate::errors::AppError::Internal(
+                "database lock poisoned".into(),
+            ))
+        })?
+        .list_messages_by_thread(&thread_id, 500)
+        .map_err(AppErrorDto::from)
 }
 
 #[tauri::command]
@@ -784,7 +793,7 @@ pub fn update_settings(
     state: State<'_, AppState>,
     settings: serde_json::Value,
 ) -> Result<serde_json::Value, AppErrorDto> {
-    state
+    let result = state
         .database
         .lock()
         .map_err(|_| {
@@ -793,7 +802,9 @@ pub fn update_settings(
             ))
         })?
         .update_settings(&settings)
-        .map_err(AppErrorDto::from)
+        .map_err(AppErrorDto::from)?;
+    state.realtime.wake();
+    Ok(result)
 }
 
 #[tauri::command]
@@ -913,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_body_command_delegates_to_async_service_and_preserves_error_code() {
         let state = AppState {
-            database: Mutex::new(Database::open_in_memory().expect("database")),
+            database: Mutex::new(Database::open_in_memory().expect("database")).into(),
             secret_store: Arc::new(FailingDeleteSecretStore),
             sync: Arc::new(SyncCoordinator::new()),
             realtime: Arc::new(RealtimeSyncCoordinator::new()),
@@ -955,7 +966,7 @@ mod tests {
             )
             .expect("account");
         let state = AppState {
-            database: Mutex::new(database),
+            database: Mutex::new(database).into(),
             secret_store: Arc::new(FailingDeleteSecretStore),
             sync: Arc::new(SyncCoordinator::new()),
             realtime: Arc::new(RealtimeSyncCoordinator::new()),

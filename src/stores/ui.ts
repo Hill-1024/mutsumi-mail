@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { sanitizeSeed, THEME_PALETTES } from '../lib/theme';
 import type { ThemeMode, ThemePaletteId } from '../types';
 
 const THEME_STORAGE_KEY = 'mutsumi_theme_mode';
@@ -6,9 +7,22 @@ const THEME_PALETTE_STORAGE_KEY = 'mutsumi_theme_palette';
 const THEME_CUSTOM_SEED_STORAGE_KEY = 'mutsumi_theme_custom_seed';
 const THEME_DYNAMIC_STORAGE_KEY = 'mutsumi_theme_android_dynamic';
 
+function readPreference(key: string): string | null {
+  try { return typeof window === 'undefined' ? null : window.localStorage.getItem(key); }
+  catch { return null; }
+}
+function writePreference(key: string, value: string) {
+  try { window.localStorage.setItem(key, value); } catch { /* Keep the in-memory preference usable. */ }
+}
+function initialPalette(): ThemePaletteId {
+  const saved = readPreference(THEME_PALETTE_STORAGE_KEY);
+  if (saved === 'custom') return saved;
+  return THEME_PALETTES.find((palette) => palette.id === saved)?.id ?? 'matcha';
+}
+
 const getInitialTheme = (): ThemeMode => {
   if (typeof window === 'undefined') return 'dark';
-  const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+  const saved = readPreference(THEME_STORAGE_KEY);
   if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
   return 'dark';
 };
@@ -24,7 +38,7 @@ export interface ComposeDraftState {
   references?: string[];
 }
 
-interface UiState {
+export interface UiState {
   themeMode: ThemeMode;
   themePalette: ThemePaletteId;
   customThemeSeed: string;
@@ -57,16 +71,15 @@ interface UiState {
 
 export const useUiStore = create<UiState>((set) => ({
   themeMode: getInitialTheme(),
-  themePalette:
-    (typeof window !== 'undefined'
-      ? (window.localStorage.getItem(THEME_PALETTE_STORAGE_KEY) as ThemePaletteId | null)
-      : null) ?? 'matcha',
-  customThemeSeed:
-    (typeof window !== 'undefined' && window.localStorage.getItem(THEME_CUSTOM_SEED_STORAGE_KEY)) ||
-    '#3F6654',
+  themePalette: initialPalette(),
+  customThemeSeed: sanitizeSeed(
+    typeof window !== 'undefined'
+      ? readPreference(THEME_CUSTOM_SEED_STORAGE_KEY)
+      : null,
+  ),
   androidDynamicColor:
     typeof window !== 'undefined' &&
-    window.localStorage.getItem(THEME_DYNAMIC_STORAGE_KEY) === 'true',
+    readPreference(THEME_DYNAMIC_STORAGE_KEY) === 'true',
   androidDynamicSeed: null,
   safeReading: true,
   selectedMailboxId: 'inbox',
@@ -78,20 +91,27 @@ export const useUiStore = create<UiState>((set) => ({
   syncMessage: null,
   setThemeMode: (themeMode) => {
     if (typeof window !== 'undefined') {
-      window.localStorage.setItem(THEME_STORAGE_KEY, themeMode);
+      writePreference(THEME_STORAGE_KEY, themeMode);
     }
     set({ themeMode });
   },
   setThemePalette: (themePalette) => {
-    window.localStorage.setItem(THEME_PALETTE_STORAGE_KEY, themePalette);
+    if (typeof window !== 'undefined') {
+      writePreference(THEME_PALETTE_STORAGE_KEY, themePalette);
+    }
     set({ themePalette });
   },
-  setCustomThemeSeed: (customThemeSeed) => {
-    window.localStorage.setItem(THEME_CUSTOM_SEED_STORAGE_KEY, customThemeSeed);
+  setCustomThemeSeed: (value) => {
+    const customThemeSeed = sanitizeSeed(value);
+    if (typeof window !== 'undefined') {
+      writePreference(THEME_CUSTOM_SEED_STORAGE_KEY, customThemeSeed);
+    }
     set({ customThemeSeed });
   },
   setAndroidDynamicColor: (androidDynamicColor) => {
-    window.localStorage.setItem(THEME_DYNAMIC_STORAGE_KEY, String(androidDynamicColor));
+    if (typeof window !== 'undefined') {
+      writePreference(THEME_DYNAMIC_STORAGE_KEY, String(androidDynamicColor));
+    }
     set({ androidDynamicColor });
   },
   setAndroidDynamicSeed: (androidDynamicSeed) => set({ androidDynamicSeed }),

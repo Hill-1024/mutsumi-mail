@@ -1,101 +1,100 @@
 package moe.mutsumi.mail
 
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
+import androidx.core.app.NotificationCompat
+import java.lang.ref.WeakReference
 
-/**
- * Keeps the process which owns Tauri's Rust IMAP-IDLE runtime alive after the
- * foreground Activity task is removed. This is deliberately in the default
- * application process: a separate process would not share the Rust runtime,
- * encrypted secrets, or database state managed by Tauri.
- */
+/** Same process as the UI; a cold service start also starts the shared Rust engine. */
 class MailSyncService : Service() {
+  private var live = false
   override fun onCreate() {
     super.onCreate()
-    createChannel()
-    promoteToForeground()
+    live = true
+    instance = WeakReference(this)
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      getSystemService(NotificationManager::class.java).createNotificationChannel(
+        NotificationChannel(CHANNEL, "后台邮件同步", NotificationManager.IMPORTANCE_LOW).apply { setShowBadge(false) },
+      )
+    }
   }
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-    promoteToForeground()
-    // Android may recreate this service after reclaiming its process. The system decides when
-    // resources permit; this does not attempt to bypass a user force-stop.
+    if (!MailSyncBridge.wanted(this) || MailSyncBridge.quotaExpired || !promote()) {
+      stopSelf()
+      return START_NOT_STICKY
+    }
+    MailSyncBridge.prepare(this) { ready ->
+      android.os.Handler(mainLooper).post {
+        if (!live) return@post
+        if (ready && MailSyncBridge.wanted(this) && !MailSyncBridge.quotaExpired) {
+          MailSyncBridge.setServiceActive(true)
+          if (!promote()) { MailSyncBridge.setServiceActive(false); stopSelf() }
+        } else stopSelf()
+      }
+    }
     return START_STICKY
   }
 
   override fun onBind(intent: Intent?): IBinder? = null
 
-  // Android 15 stops a dataSync FGS after its six-hour background budget is exhausted.
-  // Stop cleanly instead of attempting a forbidden immediate restart.
   override fun onTimeout(startId: Int, fgsType: Int) {
+    MailSyncBridge.serviceTimedOut()
     stopForeground(STOP_FOREGROUND_REMOVE)
-    stopSelf(startId)
+    stopSelf() // Do not restart a dataSync service after Android's six-hour limit.
   }
 
-  private fun createChannel() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-    val channel = NotificationChannel(
-      CHANNEL_ID,
-      "后台邮件同步",
-      NotificationManager.IMPORTANCE_LOW,
-    ).apply {
-      description = "在移除应用界面后保持 IMAP 实时收件连接"
-      setShowBadge(false)
-    }
-    getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+  override fun onDestroy() {
+    live = false
+    instance = null
+    MailSyncBridge.setServiceActive(false)
+    super.onDestroy()
   }
 
-  private fun promoteToForeground() {
-    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(this, CHANNEL_ID)
-    } else {
-      Notification.Builder(this)
+  private fun promote(): Boolean {
+    val text = when {
+      !MailSyncBridge.engineReady -> "正在连接收件服务"
+      !MailSyncBridge.online -> "后台收件等待网络恢复"
+      else -> "后台收件已开启"
     }
-    val notification = builder
-      .setSmallIcon(R.mipmap.ic_launcher)
-      .setContentTitle("Mutsumi Mail")
-      .setContentText("后台实时收件正在运行")
-      .setCategory(Notification.CATEGORY_SERVICE)
-      .setOngoing(true)
-      .setContentIntent(openAppIntent())
-      .build()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-      startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-    } else {
-      startForeground(NOTIFICATION_ID, notification)
+    val notification = NotificationCompat.Builder(this, CHANNEL)
+      .setSmallIcon(R.drawable.ic_mail_notification).setContentTitle("Mutsumi Mail")
+      .setContentText(text).setOngoing(true).setSilent(true)
+      .setCategory(NotificationCompat.CATEGORY_SERVICE)
+      .setContentIntent(MailSyncBridge.openAppIntent(this)).build()
+    return try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+      } else startForeground(NOTIFICATION_ID, notification)
+      true
+    } catch (error: Exception) {
+      Log.w("MailSync", "Foreground execution unavailable; keeping scheduled checks", error)
+      MailSyncJobService.schedule(this)
+      false
     }
-  }
-
-  private fun openAppIntent(): PendingIntent {
-    val intent = Intent(this, MainActivity::class.java).apply {
-      flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-    }
-    return PendingIntent.getActivity(
-      this,
-      0,
-      intent,
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
   }
 
   companion object {
-    private const val CHANNEL_ID = "background-mail-sync"
+    private const val CHANNEL = "background-mail-sync"
     private const val NOTIFICATION_ID = 4_200
-
+    private var instance: WeakReference<MailSyncService>? = null
+    fun refreshNotification() { instance?.get()?.let { if (MailSyncBridge.serviceActive) it.promote() } }
     fun start(context: Context) {
-      val intent = Intent(context, MailSyncService::class.java)
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        context.startForegroundService(intent)
-      } else {
-        context.startService(intent)
+      if (MailSyncBridge.serviceActive || MailSyncBridge.quotaExpired) return
+      try {
+        val intent = Intent(context, MailSyncService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+        else context.startService(intent)
+      } catch (error: Exception) {
+        Log.w("MailSync", "Background service start deferred to the system scheduler", error)
+        MailSyncJobService.schedule(context)
       }
     }
   }

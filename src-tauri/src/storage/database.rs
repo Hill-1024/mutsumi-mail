@@ -451,6 +451,15 @@ impl Database {
             unread_count,
             complete_mailbox,
         } = metadata;
+        let snapshot_uids: HashSet<_> = messages.iter().map(|message| message.uid).collect();
+        if uid_validity == Some(0)
+            || unread_count > total_count
+            || snapshot_uids.contains(&0)
+            || snapshot_uids.len() != messages.len()
+            || (complete_mailbox && messages.len() != total_count as usize)
+        {
+            return Err(AppError::Protocol("IMAP 快照的 UID 或计数不一致".into()));
+        }
         let tx = self.connection.transaction().map_err(AppError::from)?;
         let (mailbox_id, is_sent_mailbox) = tx
             .query_row(
@@ -509,6 +518,8 @@ impl Database {
         let mut inserted = 0;
         let mut updated = 0;
         let mut touched_threads = Vec::new();
+        let mut count_delta = 0i64;
+        let mut unread_delta = 0i64;
         for message in messages {
             let received_at = canonical_rfc3339(message.received_at.as_deref());
             let remote_locator = message.uid.to_string();
@@ -535,6 +546,7 @@ impl Database {
                 ));
             }
             let had_instance = existing_instance.is_some();
+            let existing_instance_id = existing_instance.as_ref().map(|(id, _, _)| id.clone());
             let pending_operation_types = if let Some((instance_id, _, _)) = &existing_instance {
                 let mut statement = tx
                     .prepare(
@@ -689,8 +701,13 @@ impl Database {
                 .map_err(AppError::from)?;
             }
 
-            let flags_json = serde_json::to_string(&canonical_imap_flags(&message.flags))
-                .map_err(AppError::from)?;
+            let mut projected_flags = canonical_imap_flags(&message.flags);
+            if preserve_local_flags {
+                if let Some(instance_id) = &existing_instance_id {
+                    overlay_pending_flags(&tx, instance_id, &mut projected_flags)?;
+                }
+            }
+            let flags_json = serde_json::to_string(&projected_flags).map_err(AppError::from)?;
             tx.execute(
                 r#"INSERT INTO message_instances (id,message_id,mailbox_id,remote_locator,uid_validity,uid,flags_json,is_deleted,last_synced_at)
                    VALUES (?,?,?,?,?,?,?,0,?)
@@ -698,7 +715,7 @@ impl Database {
                      message_id=excluded.message_id,
                      uid_validity=excluded.uid_validity,
                      uid=excluded.uid,
-                     flags_json=CASE WHEN ? THEN message_instances.flags_json ELSE excluded.flags_json END,
+                     flags_json=excluded.flags_json,
                      is_deleted=CASE WHEN ? THEN message_instances.is_deleted ELSE 0 END,
                      last_synced_at=excluded.last_synced_at"#,
                 params![
@@ -710,11 +727,25 @@ impl Database {
                     message.uid,
                     flags_json,
                     now,
-                    i64::from(preserve_local_flags),
                     i64::from(preserve_local_deletion),
                 ],
             )
             .map_err(AppError::from)?;
+
+            let hidden: bool = tx.query_row(
+                "SELECT is_deleted FROM message_instances WHERE mailbox_id=? AND remote_locator=?",
+                params![mailbox_id, remote_locator], |row| row.get(0),
+            ).map_err(AppError::from)?;
+            let server_unread = !message
+                .flags
+                .iter()
+                .any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
+            let local_unread = !hidden
+                && !projected_flags
+                    .iter()
+                    .any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
+            count_delta -= i64::from(hidden);
+            unread_delta += i64::from(local_unread) - i64::from(server_unread);
 
             if message.from.is_some() || !message.to.is_empty() {
                 tx.execute(
@@ -787,11 +818,49 @@ impl Database {
             )
             .map_err(AppError::from)?;
         }
-        tx.execute(
-            "UPDATE mailboxes SET total_count=?,unread_count=? WHERE id=? AND account_id=?",
-            params![total_count, unread_count, mailbox_id, account_id],
-        )
-        .map_err(AppError::from)?;
+        // A bounded snapshot cannot describe the remote flags of pending rows
+        // outside its page. Preserve the last coherent counters until the complete
+        // UID index reconciles them, rather than erasing local unread changes.
+        let pending_instances = {
+            let mut statement = tx.prepare(
+                "SELECT instance.uid,instance.flags_json,instance.is_deleted FROM message_instances instance WHERE instance.mailbox_id=? AND EXISTS(SELECT 1 FROM pending_operations operation WHERE operation.message_instance_id=instance.id AND operation.state IN ('pending','sending','failed'))",
+            ).map_err(AppError::from)?;
+            let rows = statement
+                .query_map([&mailbox_id], |row| {
+                    Ok((
+                        row.get::<_, Option<u32>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, bool>(2)?,
+                    ))
+                })
+                .map_err(AppError::from)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(AppError::from)?
+        };
+        let mut pending_outside_page = false;
+        for (uid, flags_json, hidden) in pending_instances {
+            if uid.is_some_and(|uid| snapshot_uids.contains(&uid)) {
+                continue;
+            }
+            pending_outside_page = true;
+            if complete_mailbox && !hidden {
+                count_delta += 1;
+                let flags: Vec<String> =
+                    serde_json::from_str(&flags_json).map_err(AppError::from)?;
+                unread_delta +=
+                    i64::from(!flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen")));
+            }
+        }
+        if complete_mailbox || !pending_outside_page {
+            let projected_total = (i64::from(total_count) + count_delta).max(0);
+            let projected_unread =
+                (i64::from(unread_count) + unread_delta).clamp(0, projected_total);
+            tx.execute(
+                "UPDATE mailboxes SET total_count=?,unread_count=? WHERE id=? AND account_id=?",
+                params![projected_total, projected_unread, mailbox_id, account_id],
+            )
+            .map_err(AppError::from)?;
+        }
 
         if let Some(uid_validity) = uid_validity {
             let previous_last_uid = tx
@@ -912,7 +981,9 @@ impl Database {
         }
         let unseen_uids = index.unseen_uids.iter().copied().collect::<HashSet<_>>();
         let flagged_uids = index.flagged_uids.iter().copied().collect::<HashSet<_>>();
-        if unseen_uids.contains(&0)
+        if unseen_uids.len() != index.unseen_uids.len()
+            || flagged_uids.len() != index.flagged_uids.len()
+            || unseen_uids.contains(&0)
             || flagged_uids.contains(&0)
             || !unseen_uids.is_subset(&all_uids)
             || !flagged_uids.is_subset(&all_uids)
@@ -968,7 +1039,7 @@ impl Database {
         let instances = {
             let mut statement = tx
                 .prepare(
-                    r#"SELECT instance.id,instance.uid,instance.flags_json,
+                    r#"SELECT instance.id,instance.uid,instance.flags_json,instance.is_deleted,
                               EXISTS(
                                 SELECT 1 FROM pending_operations operation
                                 WHERE operation.message_instance_id=instance.id
@@ -992,6 +1063,7 @@ impl Database {
                         row.get::<_, String>(2)?,
                         row.get::<_, bool>(3)?,
                         row.get::<_, bool>(4)?,
+                        row.get::<_, bool>(5)?,
                     ))
                 })
                 .map_err(AppError::from)?;
@@ -1002,22 +1074,34 @@ impl Database {
         let now = Utc::now().to_rfc3339();
         let mut removed_instances = 0;
         let mut updated_flags = 0;
-        for (instance_id, uid, flags_json, has_pending, has_pending_flags) in instances {
+        let mut projected_total = i64::from(index.total_count);
+        let mut projected_unread = unseen_uids.len() as i64;
+        for (instance_id, uid, flags_json, hidden, has_pending, has_pending_flags) in instances {
             if !all_uids.contains(&uid) {
                 if !has_pending {
                     tx.execute("DELETE FROM message_instances WHERE id=?", [&instance_id])
                         .map_err(AppError::from)?;
                     removed_instances += 1;
+                } else if !hidden {
+                    projected_total += 1;
+                    let flags: Vec<String> =
+                        serde_json::from_str(&flags_json).map_err(AppError::from)?;
+                    projected_unread +=
+                        i64::from(!flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen")));
                 }
-                continue;
-            }
-            if has_pending_flags {
                 continue;
             }
             let mut flags =
                 serde_json::from_str::<Vec<String>>(&flags_json).map_err(AppError::from)?;
             update_flag(&mut flags, "\\Seen", Some(!unseen_uids.contains(&uid)));
             update_flag(&mut flags, "\\Flagged", Some(flagged_uids.contains(&uid)));
+            if has_pending_flags {
+                overlay_pending_flags(&tx, &instance_id, &mut flags)?;
+            }
+            projected_total -= i64::from(hidden);
+            let local_unread =
+                !hidden && !flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
+            projected_unread += i64::from(local_unread) - i64::from(unseen_uids.contains(&uid));
             let normalized =
                 serde_json::to_string(&canonical_imap_flags(&flags)).map_err(AppError::from)?;
             if normalized != flags_json {
@@ -1030,11 +1114,11 @@ impl Database {
             }
         }
 
-        let unread_count = u32::try_from(unseen_uids.len())
-            .map_err(|_| AppError::Protocol("IMAP 未读索引超过支持范围".into()))?;
+        let total_count = projected_total.max(0);
+        let unread_count = projected_unread.clamp(0, total_count);
         tx.execute(
             "UPDATE mailboxes SET total_count=?,unread_count=? WHERE id=? AND account_id=?",
-            params![index.total_count, unread_count, mailbox_id, account_id],
+            params![total_count, unread_count, mailbox_id, account_id],
         )
         .map_err(AppError::from)?;
         tx.execute(
@@ -1206,12 +1290,50 @@ impl Database {
         tx.commit().map_err(AppError::from)
     }
 
+    /// Convenience wrapper over `list_messages_in_scope` for a single mailbox. Production
+    /// commands go through the scoped variant; this remains the shared test/fixture helper.
+    #[allow(dead_code)]
     pub fn list_messages(
         &self,
         mailbox_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<Message>, AppError> {
         self.list_messages_in_scope(None, mailbox_id, None, None, limit)
+    }
+
+    /// Lists every cached message belonging to one thread (oldest first). The thread key is
+    /// the effective id exposed on Message rows: `COALESCE(thread_id, id)`. Unlike filtering
+    /// the newest-N global list, this resolves complete threads regardless of mailbox age.
+    pub fn list_messages_by_thread(
+        &self,
+        thread_id: &str,
+        limit: u32,
+    ) -> Result<Vec<Message>, AppError> {
+        let sql = r#"SELECT m.id,m.account_id,mi.mailbox_id,COALESCE(m.thread_id,m.id),m.rfc_message_id,m.subject,m.normalized_subject,COALESCE(m.received_at,m.sent_at,m.created_at),m.preview,m.body_text,m.body_html_text,CASE WHEN instr(lower(mi.flags_json),'"\\seen"') > 0 THEN 1 ELSE 0 END,CASE WHEN instr(lower(mi.flags_json),'"\\flagged"') > 0 THEN 1 ELSE 0 END,m.has_attachment,(SELECT count(*) FROM attachments attachment JOIN message_parts part ON part.id=attachment.message_part_id WHERE part.message_id=m.id),m.size_bytes,COALESCE((SELECT display_name FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),''),COALESCE((SELECT email FROM message_addresses WHERE message_id=m.id AND kind='from' ORDER BY position LIMIT 1),'unknown'),COALESCE((SELECT json_group_array(json_object('name',display_name,'email',email)) FROM message_addresses WHERE message_id=m.id AND kind='to' ORDER BY position),'[]'),COALESCE((SELECT json_group_array(mailbox.display_name) FROM message_instances label_instance JOIN mailboxes mailbox ON mailbox.id=label_instance.mailbox_id WHERE label_instance.message_id=m.id AND label_instance.is_deleted=0 AND mailbox.selectable=1),'[]'),m.body_cache_state='stale_html'
+                     FROM messages m
+                     JOIN accounts account ON account.id=m.account_id
+                     JOIN message_instances mi ON mi.id=(
+                       SELECT candidate.id
+                       FROM message_instances candidate
+                       JOIN mailboxes candidate_mailbox ON candidate_mailbox.id=candidate.mailbox_id
+                       WHERE candidate.message_id=m.id
+                         AND candidate_mailbox.account_id=m.account_id
+                         AND candidate_mailbox.selectable=1
+                         AND candidate.is_deleted=0
+                       ORDER BY candidate.last_synced_at DESC,candidate.id
+                       LIMIT 1
+                     )
+                     WHERE account.enabled=1
+                       AND (m.thread_id=?1 OR (m.thread_id IS NULL AND m.id=?1))
+                     ORDER BY julianday(COALESCE(m.received_at,m.sent_at,m.created_at)) ASC,m.id
+                     LIMIT ?2"#;
+        let mut statement = self.connection.prepare(sql).map_err(AppError::from)?;
+        let mapped = statement
+            .query_map(params![thread_id, limit.min(500)], message_from_row)
+            .map_err(AppError::from)?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(AppError::from)
     }
 
     /// Queries cached messages across accounts without conflating an account with a mailbox.
@@ -1603,7 +1725,7 @@ impl Database {
                          AND operation.state IN ('pending','failed')
                          AND (operation.next_attempt_at IS NULL OR julianday(operation.next_attempt_at)<=julianday(?))
                          AND instance.uid IS NOT NULL
-                       ORDER BY operation.created_at,operation.id
+                       ORDER BY operation.created_at,operation.rowid
                        LIMIT ?"#,
                 )
                 .map_err(AppError::from)?;
@@ -1781,7 +1903,7 @@ impl Database {
             .map_err(AppError::from)?;
         let (instance_id, account_id, mut flags_json) =
             instance.ok_or_else(|| AppError::not_found("message instance"))?;
-        let mut flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+        let mut flags: Vec<String> = serde_json::from_str(&flags_json).map_err(AppError::from)?;
         let was_read = flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
         update_flag(&mut flags, "\\Seen", is_read);
         update_flag(&mut flags, "\\Flagged", is_starred);
@@ -1848,7 +1970,8 @@ impl Database {
                 .map_err(AppError::from)?;
             let (instance_id, account_id, flags_json) =
                 instance.ok_or_else(|| AppError::not_found("message instance"))?;
-            let mut flags: Vec<String> = serde_json::from_str(&flags_json).unwrap_or_default();
+            let mut flags: Vec<String> =
+                serde_json::from_str(&flags_json).map_err(AppError::from)?;
             let was_read = flags.iter().any(|flag| flag.eq_ignore_ascii_case("\\Seen"));
             update_flag(&mut flags, "\\Seen", is_read);
             update_flag(&mut flags, "\\Flagged", is_starred);
@@ -2133,7 +2256,7 @@ impl Database {
             subject,
             body_text,
             in_reply_to,
-            references: serde_json::from_str(&references).unwrap_or_default(),
+            references: serde_json::from_str(&references).map_err(AppError::from)?,
         })
     }
 
@@ -2369,21 +2492,21 @@ impl Database {
                 .map_err(AppError::from)?;
         let (id, account_id, to, cc, bcc, subject, body_text, in_reply_to, references) =
             row.ok_or_else(|| AppError::not_found("draft"))?;
-        let addresses = |json: &str| -> String {
-            serde_json::from_str::<Vec<String>>(json)
-                .unwrap_or_default()
-                .join(", ")
+        let addresses = |json: &str| -> Result<String, AppError> {
+            Ok(serde_json::from_str::<Vec<String>>(json)
+                .map_err(AppError::from)?
+                .join(", "))
         };
         Ok(DraftInput {
             id: Some(id),
             account_id,
-            to: addresses(&to),
-            cc: Some(addresses(&cc)).filter(|value| !value.is_empty()),
-            bcc: Some(addresses(&bcc)).filter(|value| !value.is_empty()),
+            to: addresses(&to)?,
+            cc: Some(addresses(&cc)?).filter(|value| !value.is_empty()),
+            bcc: Some(addresses(&bcc)?).filter(|value| !value.is_empty()),
             subject,
             body_text,
             in_reply_to,
-            references: serde_json::from_str(&references).unwrap_or_default(),
+            references: serde_json::from_str(&references).map_err(AppError::from)?,
         })
     }
 
@@ -2426,6 +2549,18 @@ impl Database {
         let object = patch
             .as_object()
             .ok_or_else(|| AppError::InvalidConfiguration("账户更新必须是 JSON 对象".into()))?;
+        for (key, value) in object {
+            let valid = match key.as_str() {
+                "displayName" | "syncPolicy" => value.is_string(),
+                "enabled" => value.is_boolean(),
+                _ => false,
+            };
+            if !valid {
+                return Err(AppError::InvalidConfiguration(format!(
+                    "无效的账户字段或类型：{key}"
+                )));
+            }
+        }
         let display_name = object
             .get("displayName")
             .and_then(serde_json::Value::as_str);
@@ -2467,6 +2602,7 @@ impl Database {
             ("androidDynamicColor".into(), json!(false)),
             ("safeReading".into(), json!(true)),
             ("syncPolicy".into(), json!("automatic")),
+            ("backgroundMail".into(), json!(true)),
         ]);
         let mut statement = self
             .connection
@@ -2500,6 +2636,7 @@ impl Database {
             "androidDynamicColor",
             "safeReading",
             "syncPolicy",
+            "backgroundMail",
         ];
         let now = Utc::now().to_rfc3339();
         let tx = self.connection.transaction().map_err(AppError::from)?;
@@ -2518,10 +2655,10 @@ impl Database {
                         "theme 必须是 system、light 或 dark".into(),
                     ));
                 }
-                "safeReading" if !value.is_boolean() => {
-                    return Err(AppError::InvalidConfiguration(
-                        "safeReading 必须是布尔值".into(),
-                    ));
+                "safeReading" | "backgroundMail" if !value.is_boolean() => {
+                    return Err(AppError::InvalidConfiguration(format!(
+                        "{key} 必须是布尔值"
+                    )));
                 }
                 "colorScheme"
                     if !matches!(
@@ -2593,10 +2730,17 @@ impl Database {
     }
 
     pub fn search_suggestions(&self, query: &str, limit: u32) -> Result<Vec<String>, AppError> {
-        let pattern = format!("%{}%", query.trim());
+        // Escape LIKE metacharacters so a query such as "100%" matches the literal text
+        // instead of acting as a wildcard over every subject.
+        let escaped = query
+            .trim()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
         let mut statement = self
             .connection
-            .prepare("SELECT DISTINCT subject FROM messages WHERE subject LIKE ? AND subject <> '' ORDER BY updated_at DESC LIMIT ?")
+            .prepare("SELECT DISTINCT subject FROM messages WHERE subject LIKE ? ESCAPE '\\' AND subject <> '' ORDER BY updated_at DESC LIMIT ?")
             .map_err(AppError::from)?;
         let rows = statement
             .query_map(params![pattern, limit.min(20)], |row| row.get(0))
@@ -2865,6 +3009,34 @@ fn build_fts_query(query: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Overlay only fields the user changed. A pending star must not freeze remote
+/// read state, and the insertion order breaks equal timestamp ties deterministically.
+fn overlay_pending_flags(
+    tx: &rusqlite::Transaction<'_>,
+    instance_id: &str,
+    flags: &mut Vec<String>,
+) -> Result<(), AppError> {
+    let mut statement = tx.prepare(
+        "SELECT payload_json FROM pending_operations WHERE message_instance_id=? AND operation_type='set_flags' AND state IN ('pending','sending','failed') ORDER BY created_at,rowid",
+    ).map_err(AppError::from)?;
+    let payloads = statement
+        .query_map([instance_id], |row| row.get::<_, String>(0))
+        .map_err(AppError::from)?;
+    for payload in payloads {
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload.map_err(AppError::from)?).map_err(AppError::from)?;
+        for (field, flag) in [("is_read", "\\Seen"), ("is_starred", "\\Flagged")] {
+            if let Some(value) = payload.get(field).filter(|value| !value.is_null()) {
+                let value = value
+                    .as_bool()
+                    .ok_or_else(|| AppError::InvalidConfiguration("待同步标记不是布尔值".into()))?;
+                update_flag(flags, flag, Some(value));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn canonical_imap_flags(flags: &[String]) -> Vec<String> {
@@ -3575,7 +3747,7 @@ mod tests {
             .apply_imap_snapshot(
                 &account.id,
                 "INBOX",
-                snapshot_metadata(Some(42), 10, 5, true),
+                snapshot_metadata(Some(42), 10, 5, false),
                 &first_snapshot,
             )
             .expect("apply snapshot");
@@ -3620,7 +3792,7 @@ mod tests {
             .apply_imap_snapshot(
                 &account.id,
                 "INBOX",
-                snapshot_metadata(Some(42), 10, 4, true),
+                snapshot_metadata(Some(42), 10, 4, false),
                 &first_snapshot,
             )
             .expect("reapply snapshot");
@@ -3878,6 +4050,105 @@ mod tests {
             .remove(0);
         assert_eq!(mailbox.total_count, 2);
         assert_eq!(mailbox.unread_count, 1);
+
+        database
+            .mutate_message(&first_id, &mailbox_id, Some(false), None)
+            .expect("manual unread");
+        database
+            .mutate_message(&first_id, &mailbox_id, Some(true), None)
+            .expect("read again");
+        database
+            .mutate_message(&first_id, &mailbox_id, Some(false), None)
+            .expect("latest unread wins");
+        database
+            .connection
+            .execute(
+                "UPDATE pending_operations SET created_at='2026-09-07T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        database
+            .apply_imap_snapshot(
+                &account.id,
+                "INBOX",
+                snapshot_metadata(Some(7), 3, 0, false),
+                &messages[1..],
+            )
+            .expect("bounded page excludes pending message");
+        assert_eq!(
+            database.list_mailboxes(&account.id).unwrap()[0].unread_count,
+            2
+        );
+        let index = IncomingMailboxIndex {
+            remote_id: "INBOX".into(),
+            uid_validity: Some(7),
+            total_count: 2,
+            all_uids: vec![1, 2],
+            unseen_uids: vec![2],
+            flagged_uids: vec![2],
+        };
+        for _ in 0..2 {
+            database
+                .reconcile_imap_mailbox_index(&account.id, &index)
+                .expect("pending unread reconciliation");
+            assert!(
+                !database
+                    .get_message_in_mailbox(&first_id, &mailbox_id)
+                    .unwrap()
+                    .is_read
+            );
+            assert_eq!(
+                database.list_mailboxes(&account.id).unwrap()[0].unread_count,
+                2
+            );
+        }
+        // A local star cannot freeze the server's independent read flag.
+        database
+            .connection
+            .execute("DELETE FROM pending_operations", [])
+            .unwrap();
+        database
+            .mutate_message(&first_id, &mailbox_id, None, Some(false))
+            .unwrap();
+        database
+            .reconcile_imap_mailbox_index(&account.id, &index)
+            .unwrap();
+        let current = database
+            .get_message_in_mailbox(&first_id, &mailbox_id)
+            .unwrap();
+        assert!(current.is_read);
+        assert!(!current.is_starred);
+        assert_eq!(
+            database.list_mailboxes(&account.id).unwrap()[0].unread_count,
+            1
+        );
+
+        // Hidden local deletions remain excluded until the server confirms them.
+        database
+            .delete_messages(&[(first_id.clone(), mailbox_id.clone())], true)
+            .unwrap();
+        database
+            .reconcile_imap_mailbox_index(&account.id, &index)
+            .unwrap();
+        let mailbox = &database.list_mailboxes(&account.id).unwrap()[0];
+        assert_eq!((mailbox.total_count, mailbox.unread_count), (1, 1));
+        let mut invalid = index.clone();
+        invalid.unseen_uids = vec![2, 2];
+        assert!(database
+            .reconcile_imap_mailbox_index(&account.id, &invalid)
+            .is_err());
+        assert!(database
+            .apply_imap_snapshot(
+                &account.id,
+                "INBOX",
+                snapshot_metadata(Some(7), 3, 0, true),
+                &messages[..1]
+            )
+            .is_err());
+        assert_eq!(
+            database.list_mailboxes(&account.id).unwrap()[0].total_count,
+            1
+        );
     }
 
     fn assert_instance_uidvalidity_reset(stored_uid_validity: Option<u32>, email: &str) {
@@ -4370,6 +4641,35 @@ mod tests {
             )
             .expect("pending operations after rollback");
         assert_eq!(pending_count_after_error, 2);
+        // Corrupt persisted flags must fail atomically rather than become an empty list.
+        database
+            .connection
+            .execute(
+                "UPDATE message_instances SET flags_json='broken' WHERE message_id=?",
+                [&refs[0].0],
+            )
+            .unwrap();
+        assert!(database
+            .mutate_message(&refs[0].0, &mailbox.id, Some(false), None)
+            .is_err());
+        assert_eq!(
+            database.list_mailboxes(&account.id).unwrap()[0].unread_count,
+            0
+        );
+        let pending: i64 = database
+            .connection
+            .query_row("SELECT count(*) FROM pending_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pending, 2);
+        assert!(database
+            .update_account(
+                &account.id,
+                &json!({ "displayName": "must not save", "enabled": "false" })
+            )
+            .is_err());
+        assert_eq!(database.list_accounts().unwrap()[0].display_name, "Batch");
     }
 
     #[test]

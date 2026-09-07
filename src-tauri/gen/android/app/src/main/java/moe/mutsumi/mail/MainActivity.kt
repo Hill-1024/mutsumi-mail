@@ -14,7 +14,17 @@ class MainActivity : TauriActivity() {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     enterImmersiveMode()
-    MailSyncService.start(this)
+    MailSyncBridge.prepare(this)
+  }
+
+  override fun onStart() {
+    super.onStart()
+    MailSyncBridge.setForeground(true)
+  }
+
+  override fun onStop() {
+    MailSyncBridge.setForeground(false)
+    super.onStop()
   }
 
   override fun onWindowFocusChanged(hasFocus: Boolean) {

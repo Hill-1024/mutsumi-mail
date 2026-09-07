@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use crate::mail_runtime::MailRuntime;
 use mail_parser::MessageParser;
-use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+use std::sync::Arc;
+use tauri::AppHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::app_state::AppState;
@@ -24,6 +25,29 @@ use crate::storage::database::{
 const MAX_BACKFILL_PAGES_PER_MAILBOX: usize = 8;
 const MAX_FORWARD_PAGES_PER_MAILBOX: usize = 8;
 const MAX_PENDING_OPERATIONS_PER_SYNC: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncMode {
+    Full,
+    Realtime,
+    Quick,
+    #[cfg(target_os = "android")]
+    BackgroundCheck,
+}
+
+impl SyncMode {
+    fn history_pages(self) -> usize {
+        match self {
+            Self::Full => MAX_BACKFILL_PAGES_PER_MAILBOX,
+            // Keep advancing the persisted history cursor without holding new arrivals behind
+            // eight history pages per folder on every server push or automatic refresh.
+            Self::Realtime => 1,
+            Self::Quick => 0,
+            #[cfg(target_os = "android")]
+            Self::BackgroundCheck => 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MailboxFetchPlan {
@@ -64,12 +88,13 @@ struct PendingFlushReport {
 }
 
 struct BackfillRequest<'a> {
-    app: &'a AppHandle,
+    app: &'a Arc<MailRuntime>,
     account_id: &'a str,
     secret: &'a str,
     mailbox_remote_id: &'a str,
     expected_uid_validity: Option<u32>,
     remote_total_count: u32,
+    page_limit: usize,
     token: &'a CancellationToken,
 }
 
@@ -79,7 +104,7 @@ pub fn start_sync(
     account_id: String,
 ) -> Result<SyncStatus, AppError> {
     let token = state.sync.start(&account_id);
-    start_sync_with_token(state, app, account_id, token)
+    start_sync_with_token(state, MailRuntime::from_app(&app), account_id, token)
 }
 
 /// Starts a background refresh only when this account is idle. This is used for incidental
@@ -93,27 +118,50 @@ pub fn start_sync_if_idle(
     let Some(token) = state.sync.try_start(&account_id) else {
         return Ok(None);
     };
-    start_sync_with_token(state, app, account_id, token).map(Some)
+    start_sync_with_token(state, MailRuntime::from_app(&app), account_id, token).map(Some)
 }
 
 /// Starts an incidental sync from an already-authorized realtime connection. Keeping the
 /// credential in that listener's lifetime avoids reopening the OS keychain for every IDLE wake.
+pub(crate) struct BackgroundSync {
+    pub cancellation: CancellationToken,
+    pub permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 pub(crate) fn start_sync_if_idle_with_session(
     state: &AppState,
-    app: AppHandle,
+    app: Arc<MailRuntime>,
     account_id: String,
     config: IncomingConfig,
     secret: String,
+    full_refresh: bool,
+    background: BackgroundSync,
 ) -> Result<Option<SyncStatus>, AppError> {
-    let Some(token) = state.sync.try_start(&account_id) else {
+    let Some(token) = state
+        .sync
+        .try_start_child(&account_id, &background.cancellation)
+    else {
         return Ok(None);
     };
-    start_sync_with_loaded_session(state, app, account_id, config, secret, token, true).map(Some)
+    start_sync_with_loaded_session(
+        app,
+        account_id,
+        config,
+        secret,
+        token,
+        if full_refresh {
+            SyncMode::Realtime
+        } else {
+            SyncMode::Quick
+        },
+        Some(background),
+    )
+    .map(Some)
 }
 
 fn start_sync_with_token(
     state: &AppState,
-    app: AppHandle,
+    app: Arc<MailRuntime>,
     account_id: String,
     token: CancellationToken,
 ) -> Result<SyncStatus, AppError> {
@@ -131,21 +179,22 @@ fn start_sync_with_token(
             return Err(error);
         }
     };
-    start_sync_with_loaded_session(state, app, account_id, config, secret, token, false)
+    start_sync_with_loaded_session(app, account_id, config, secret, token, SyncMode::Full, None)
 }
 
 fn start_sync_with_loaded_session(
-    state: &AppState,
-    app: AppHandle,
+    app: Arc<MailRuntime>,
     account_id: String,
     config: IncomingConfig,
     secret: String,
     token: CancellationToken,
-    should_notify_new_mail: bool,
+    mode: SyncMode,
+    background: Option<BackgroundSync>,
 ) -> Result<SyncStatus, AppError> {
+    let state = &app.state;
     // A first sync can insert an entire mailbox history. Remember whether this account has
     // already completed a sync before this pass, so only subsequent realtime deltas notify.
-    let had_completed_sync = if should_notify_new_mail {
+    let had_completed_sync = if mode != SyncMode::Full {
         state
             .database
             .lock()
@@ -200,24 +249,30 @@ fn start_sync_with_loaded_session(
 
     let account_for_task = account_id.clone();
     tauri::async_runtime::spawn(async move {
-        let backend = ImapIncomingBackend::new(config);
-        match synchronize_account(&app, &account_for_task, &backend, &secret, &token).await {
+        // Retain capacity until transfer cleanup actually ends, even if its listener stopped.
+        let _permit = background.map(|work| work.permit);
+        let backend = match mode {
+            SyncMode::Full => ImapIncomingBackend::new(config),
+            _ => ImapIncomingBackend::metadata_only(config),
+        };
+        match synchronize_account(
+            &app,
+            &account_for_task,
+            &backend,
+            &secret,
+            &token,
+            mode,
+            had_completed_sync,
+        )
+        .await
+        {
             Ok(report) => {
                 let completed_account = account_for_task.clone();
-                let notification_app = app.clone();
                 finish_current_sync(&app, &account_for_task, &token, move |state| {
                     match state.database.lock() {
                         Ok(mut database) => {
                             match database.mark_account_sync_completed(&completed_account) {
-                                Ok(()) => {
-                                    if should_notify_new_mail
-                                        && had_completed_sync
-                                        && report.inserted > 0
-                                    {
-                                        notify_new_mail(&notification_app, report.inserted);
-                                    }
-                                    successful_sync_status(completed_account, report)
-                                }
+                                Ok(()) => successful_sync_status(completed_account, report),
                                 Err(error) => sync_error_status(completed_account, error),
                             }
                         }
@@ -228,7 +283,22 @@ fn start_sync_with_loaded_session(
                     }
                 });
             }
-            Err(AppError::Cancelled) => {}
+            Err(AppError::Cancelled) => {
+                finish_current_sync(&app, &account_for_task, &token, |state| {
+                    if let Ok(mut database) = state.database.lock() {
+                        let _ = database.mark_account_sync_cancelled(&account_for_task);
+                    }
+                    SyncStatus {
+                        account_id: account_for_task.clone(),
+                        state: "idle".into(),
+                        phase: None,
+                        processed: None,
+                        total: None,
+                        message: None,
+                        retryable: false,
+                    }
+                });
+            }
             Err(error) => {
                 let failed_account = account_for_task.clone();
                 finish_current_sync(&app, &account_for_task, &token, move |state| {
@@ -244,32 +314,99 @@ fn start_sync_with_loaded_session(
     Ok(initial_status)
 }
 
-fn notify_new_mail(app: &AppHandle, inserted: usize) {
-    let body = if inserted == 1 {
-        "你有 1 封新邮件".to_string()
-    } else {
-        format!("你有 {inserted} 封新邮件")
-    };
-    if let Err(error) = app
-        .notification()
-        .builder()
-        .id(4_201)
-        .title("Mutsumi Mail")
-        .body(body)
-        .show()
+fn notify_new_mail(app: &Arc<MailRuntime>, inserted: usize) {
+    app.notify_new_mail(inserted);
+}
+
+/// A JobScheduler window can start in a process with no Activity or WebView. Keep this pass
+/// read-only so expiration may cancel network I/O without stranding an in-flight MOVE or send.
+#[cfg(target_os = "android")]
+pub async fn background_check(
+    app: Arc<MailRuntime>,
+    cancellation: CancellationToken,
+) -> Result<(), AppError> {
+    if !crate::background::enabled(&app.state) {
+        return Ok(());
+    }
+    let mut retry_needed = false;
+    for account_id in crate::application::realtime_sync_service::automatic_incoming_accounts(&app)?
     {
-        // Notification access is optional. A denied or unavailable permission must never make
-        // a successfully synchronized mailbox look failed.
-        tracing::debug!(%error, "new-mail notification was not delivered");
+        ensure_not_cancelled(&cancellation)?;
+        let _permit = tokio::select! {
+            _ = cancellation.cancelled() => return Err(AppError::Cancelled),
+            permit = app.background_slots.clone().acquire_owned() => permit.map_err(|_| AppError::Cancelled)?,
+        };
+        let Some(token) = app.state.sync.try_start(&account_id) else {
+            continue;
+        };
+        let result = async {
+            let (config, secret) = load_incoming_session(&app.state, &account_id)?;
+            let had_sync = app.state.database.lock().map_err(|_| AppError::Internal("database lock poisoned".into()))?
+                .list_accounts()?.iter().any(|account| account.id == account_id && account.last_synced_at.is_some());
+            let backend = ImapIncomingBackend::metadata_only(config);
+            tokio::select! {
+                _ = cancellation.cancelled() => Err(AppError::Cancelled),
+                _ = token.cancelled() => Err(AppError::Cancelled),
+                result = synchronize_account(&app, &account_id, &backend, &secret, &token, SyncMode::BackgroundCheck, had_sync) => result,
+            }
+        }.await;
+        let cancelled = matches!(result, Err(AppError::Cancelled));
+        retry_needed |= result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.retryable() || matches!(error, AppError::Protocol(_)));
+        let failed_account = account_id.clone();
+        finish_current_sync(&app, &account_id, &token, |state| {
+            let Ok(mut database) = state.database.lock() else {
+                return sync_error_status(
+                    failed_account,
+                    AppError::Internal("database lock poisoned".into()),
+                );
+            };
+            match result {
+                Ok(report) => match database.mark_account_sync_completed(&failed_account) {
+                    Ok(()) => successful_sync_status(failed_account, report),
+                    Err(error) => sync_error_status(failed_account, error),
+                },
+                Err(AppError::Cancelled) => {
+                    let _ = database.mark_account_sync_cancelled(&failed_account);
+                    SyncStatus {
+                        account_id: failed_account,
+                        state: "idle".into(),
+                        phase: None,
+                        processed: None,
+                        total: None,
+                        message: None,
+                        retryable: false,
+                    }
+                }
+                Err(error) => {
+                    let _ = database.mark_account_sync_failed(&failed_account, &error.to_string());
+                    sync_error_status(failed_account, error)
+                }
+            }
+        });
+        if cancelled {
+            return Err(AppError::Cancelled);
+        }
+    }
+    if retry_needed {
+        // Preserve each account's detailed status above, and also tell JobScheduler that a
+        // transient failure needs its bounded backoff instead of reporting a successful job.
+        Err(AppError::Network("后台收信检查尚未完成".into()))
+    } else {
+        Ok(())
     }
 }
 
 async fn synchronize_account<B: IncomingMailBackend + ?Sized>(
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     account_id: &str,
     backend: &B,
     secret: &str,
     token: &CancellationToken,
+    mode: SyncMode,
+    should_notify_new_mail: bool,
 ) -> Result<SyncReport, AppError> {
     ensure_not_cancelled(token)?;
     publish_status(
@@ -318,11 +455,7 @@ async fn synchronize_account<B: IncomingMailBackend + ?Sized>(
         Ok(mailboxes)
     })?;
 
-    // Local mutations are optimistic. Push them before reading message snapshots so a stale
-    // server view cannot immediately undo a flag, move, trash, or permanent-delete action.
-    let pending_flush = flush_pending_operations(app, account_id, backend, secret, token).await?;
-
-    let plans = with_current_sync_state(app, account_id, token, |state| {
+    let mut plans = with_current_sync_state(app, account_id, token, |state| {
         let database = state
             .database
             .lock()
@@ -348,12 +481,16 @@ async fn synchronize_account<B: IncomingMailBackend + ?Sized>(
             .collect::<Result<Vec<_>, AppError>>()
     })?;
 
+    // LIST order is provider-defined. Receive the inbox before archives or sent mail.
+    plans.sort_by_key(|plan| !plan.remote_id.eq_ignore_ascii_case("INBOX"));
+    publish_cache_changed(app, account_id, token)?;
+    let mut history_plans = Vec::new();
     let mut report = SyncReport {
         mailbox_count: plans.len(),
         inserted: 0,
         updated: 0,
-        applied_operations: pending_flush.completed,
-        operation_budget_exhausted: pending_flush.budget_exhausted,
+        applied_operations: 0,
+        operation_budget_exhausted: false,
         forward_limited_mailboxes: 0,
         history_limited_mailboxes: 0,
     };
@@ -377,6 +514,23 @@ async fn synchronize_account<B: IncomingMailBackend + ?Sized>(
         let mut forward_pages = 0;
         let (mut remote_total_count, mut remote_uid_validity, forward_remaining, coverage_complete) = loop {
             let fetched = fetch_snapshot(backend, secret, &next_plan, token).await?;
+            // Quiet watchdog passes need neither a full UID/flags index nor a cache rewrite.
+            // IDLE changes and the periodic maintenance pass still reconcile all flags.
+            if mode.history_pages() == 0
+                && fetched.snapshot.messages.is_empty()
+                && next_plan.expected_uid_validity == fetched.snapshot.uid_validity
+                && local_by_remote.get(&plan.remote_id).is_some_and(|local| {
+                    local.total_count == i64::from(fetched.snapshot.total_count)
+                        && local.unread_count == i64::from(fetched.snapshot.unread_count)
+                })
+            {
+                break (
+                    fetched.snapshot.total_count,
+                    fetched.snapshot.uid_validity,
+                    false,
+                    true,
+                );
+            }
             forward_pages += 1;
             ensure_not_cancelled(token)?;
             let batch_size = fetched.snapshot.messages.len();
@@ -411,6 +565,17 @@ async fn synchronize_account<B: IncomingMailBackend + ?Sized>(
             })?;
             report.inserted += applied.inserted;
             report.updated += applied.updated;
+            publish_cache_changed(app, account_id, token)?;
+            // Notify as soon as an inbox delta is committed, never for imported history, Sent
+            // copies, or a UIDVALIDITY reset that makes old messages look newly inserted.
+            if should_notify_new_mail
+                && next_plan.remote_id.eq_ignore_ascii_case("INBOX")
+                && next_plan.since_uid.is_some()
+                && next_plan.expected_uid_validity == fetched.snapshot.uid_validity
+                && applied.inserted > 0
+            {
+                notify_new_mail(app, applied.inserted);
+            }
 
             let Some(follow_up) =
                 next_incremental_plan(&next_plan, &fetched, batch_size, batch_last_uid)
@@ -471,27 +636,45 @@ async fn synchronize_account<B: IncomingMailBackend + ?Sized>(
                 database.reconcile_imap_mailbox_index(account_id, &mailbox_index)
             })?;
             report.updated += reconciled.updated_flags;
+            publish_cache_changed(app, account_id, token)?;
             remote_total_count = mailbox_index.total_count;
             remote_uid_validity = mailbox_index.uid_validity;
         }
 
-        let backfill = if forward_remaining {
-            BackfillReport::default()
-        } else {
-            backfill_mailbox_history(
-                backend,
-                BackfillRequest {
-                    app,
-                    account_id,
-                    secret,
-                    mailbox_remote_id: &plan.remote_id,
-                    expected_uid_validity: remote_uid_validity,
-                    remote_total_count,
-                    token,
-                },
-            )
-            .await?
-        };
+        if !forward_remaining && mode.history_pages() > 0 {
+            history_plans.push((plan, remote_total_count, remote_uid_validity));
+        }
+    }
+
+    // Snapshots and reconciliation overlay the durable local operation queue. New arrivals
+    // can therefore be published before a slow or rejected queued mutation is sent.
+    #[cfg(target_os = "android")]
+    if mode == SyncMode::BackgroundCheck {
+        return Ok(report);
+    }
+    let pending_flush = flush_pending_operations(app, account_id, backend, secret, token).await?;
+    report.applied_operations = pending_flush.completed;
+    report.operation_budget_exhausted = pending_flush.budget_exhausted;
+    if pending_flush.completed > 0 {
+        publish_cache_changed(app, account_id, token)?;
+    }
+
+    // Finish every folder's current mail before downloading older pages from any folder.
+    for (plan, remote_total_count, remote_uid_validity) in history_plans {
+        let backfill = backfill_mailbox_history(
+            backend,
+            BackfillRequest {
+                app,
+                account_id,
+                secret,
+                mailbox_remote_id: &plan.remote_id,
+                expected_uid_validity: remote_uid_validity,
+                remote_total_count,
+                page_limit: mode.history_pages(),
+                token,
+            },
+        )
+        .await?;
         report.inserted += backfill.inserted;
         report.updated += backfill.updated;
         if backfill.history_remaining {
@@ -504,7 +687,7 @@ async fn synchronize_account<B: IncomingMailBackend + ?Sized>(
 }
 
 async fn flush_pending_operations<B: IncomingMailBackend + ?Sized>(
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     account_id: &str,
     backend: &B,
     secret: &str,
@@ -641,10 +824,8 @@ fn optional_boolean(payload: &serde_json::Value, field: &str) -> Result<Option<b
     }
 }
 
-fn complete_pending_operation(app: &AppHandle, operation_id: &str) -> Result<(), AppError> {
-    let state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| AppError::Internal("application state unavailable".into()))?;
+fn complete_pending_operation(app: &Arc<MailRuntime>, operation_id: &str) -> Result<(), AppError> {
+    let state = &app.state;
     let mut database = state
         .database
         .lock()
@@ -653,14 +834,12 @@ fn complete_pending_operation(app: &AppHandle, operation_id: &str) -> Result<(),
 }
 
 fn fail_pending_operation(
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     operation_id: &str,
     error_code: &str,
     retryable: bool,
 ) -> Result<(), AppError> {
-    let state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| AppError::Internal("application state unavailable".into()))?;
+    let state = &app.state;
     let mut database = state
         .database
         .lock()
@@ -679,10 +858,11 @@ async fn backfill_mailbox_history<B: IncomingMailBackend + ?Sized>(
         mailbox_remote_id,
         expected_uid_validity,
         mut remote_total_count,
+        page_limit,
         token,
     } = request;
     let mut report = BackfillReport::default();
-    for page_index in 0..MAX_BACKFILL_PAGES_PER_MAILBOX {
+    for page_index in 0..page_limit {
         ensure_not_cancelled(token)?;
         let Some(window) = load_imap_sync_window(app, account_id, mailbox_remote_id, token)? else {
             // Without UIDVALIDITY there is no safe identity against which an older UID page can
@@ -753,6 +933,7 @@ async fn backfill_mailbox_history<B: IncomingMailBackend + ?Sized>(
         })?;
         report.inserted += applied.inserted;
         report.updated += applied.updated;
+        publish_cache_changed(app, account_id, token)?;
 
         // SEARCH returns every UID below `before_uid` and the backend keeps the newest bounded
         // suffix. A short page therefore proves that no still-older page exists. Concurrent new
@@ -770,7 +951,7 @@ async fn backfill_mailbox_history<B: IncomingMailBackend + ?Sized>(
 }
 
 fn load_imap_sync_window(
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     account_id: &str,
     mailbox_remote_id: &str,
     token: &CancellationToken,
@@ -1000,7 +1181,7 @@ fn count_as_i64(count: usize) -> i64 {
 
 fn record_start_error(
     state: &AppState,
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     account_id: &str,
     token: &CancellationToken,
     message: String,
@@ -1076,21 +1257,21 @@ fn sync_error_status(account_id: String, error: AppError) -> SyncStatus {
         processed: None,
         total: None,
         message: Some(error.to_string()),
-        retryable: error.retryable(),
+        // Read-side UID/FETCH races and provider protocol errors need a fresh snapshot. This
+        // does not change the durable mutation queue's retry policy for MOVE/DELETE/APPEND.
+        retryable: error.retryable() || matches!(error, AppError::Protocol(_)),
     }
 }
 
 fn finish_current_sync(
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     account_id: &str,
     token: &CancellationToken,
     status: impl FnOnce(&AppState) -> SyncStatus,
 ) {
-    let Some(state) = app.try_state::<AppState>() else {
-        return;
-    };
+    let state = &app.state;
     state.sync.finish_current(account_id, token, || {
-        let status = status(&state);
+        let status = status(state);
         state.sync.set_status(status.clone());
         let _ = app.emit("sync-progress", status);
     });
@@ -1098,28 +1279,38 @@ fn finish_current_sync(
 }
 
 fn with_current_sync_state<R>(
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     account_id: &str,
     token: &CancellationToken,
     action: impl FnOnce(&AppState) -> Result<R, AppError>,
 ) -> Result<R, AppError> {
-    let state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| AppError::Internal("application state unavailable".into()))?;
+    let state = &app.state;
     state
         .sync
-        .with_current(account_id, token, || action(&state))
+        .with_current(account_id, token, || action(state))
         .ok_or(AppError::Cancelled)?
 }
 
+fn publish_cache_changed(
+    app: &Arc<MailRuntime>,
+    account_id: &str,
+    token: &CancellationToken,
+) -> Result<(), AppError> {
+    with_current_sync_state(app, account_id, token, |_| {
+        let _ = app.emit(
+            "mail-cache-changed",
+            serde_json::json!({ "accountId": account_id }),
+        );
+        Ok(())
+    })
+}
+
 fn publish_status(
-    app: &AppHandle,
+    app: &Arc<MailRuntime>,
     token: &CancellationToken,
     status: SyncStatus,
 ) -> Result<(), AppError> {
-    let state = app
-        .try_state::<AppState>()
-        .ok_or_else(|| AppError::Internal("application state unavailable".into()))?;
+    let state = &app.state;
     let account_id = status.account_id.clone();
     state
         .sync
@@ -1159,7 +1350,8 @@ mod tests {
 
     use super::{
         fetch_backfill_snapshot, fetch_snapshot, map_incoming_message, next_backfill_before_uid,
-        next_incremental_plan, pending_operation_to_remote, FetchedSnapshot, MailboxFetchPlan,
+        next_incremental_plan, pending_operation_to_remote, sync_error_status, synchronize_account,
+        FetchedSnapshot, MailboxFetchPlan, SyncMode,
     };
     use crate::backends::imap::MAX_FETCH_MESSAGES;
     use crate::backends::incoming::{
@@ -1170,6 +1362,179 @@ mod tests {
     use crate::errors::AppError;
     use crate::storage::database::{ImapSyncWindow, PendingImapOperation};
     use tokio_util::sync::CancellationToken;
+
+    struct HeadlessBackend {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl IncomingMailBackend for HeadlessBackend {
+        fn backend_name(&self) -> &'static str {
+            "headless-test"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities::default()
+        }
+        async fn test_connection(
+            &self,
+            _secret: &str,
+        ) -> Result<ServerCapabilities, IncomingError> {
+            Ok(ServerCapabilities {
+                backend: "test".into(),
+                capabilities: ProviderCapabilities::default(),
+                greeting: None,
+            })
+        }
+        async fn list_remote_mailboxes(
+            &self,
+            _secret: &str,
+        ) -> Result<Vec<IncomingMailbox>, IncomingError> {
+            Ok(["Archive", "INBOX"]
+                .into_iter()
+                .map(|name| IncomingMailbox {
+                    attributes: Vec::new(),
+                    remote_id: name.into(),
+                    display_name: name.into(),
+                    delimiter: Some("/".into()),
+                    special_role: if name == "INBOX" {
+                        Some("inbox".into())
+                    } else {
+                        None
+                    },
+                    selectable: true,
+                })
+                .collect())
+        }
+        async fn fetch_remote_messages(
+            &self,
+            _secret: &str,
+            mailbox: &str,
+            since: Option<u32>,
+            _limit: u32,
+        ) -> Result<IncomingMailboxSnapshot, IncomingError> {
+            self.calls.lock().expect("calls").push(mailbox.into());
+            let inbox = mailbox == "INBOX";
+            Ok(IncomingMailboxSnapshot {
+                remote_id: mailbox.into(),
+                uid_validity: Some(42),
+                total_count: u32::from(inbox),
+                unread_count: u32::from(inbox),
+                coverage_complete: since.is_none(),
+                messages: if inbox && since.is_none() {
+                    vec![IncomingMessage {
+                        sequence: 1,
+                        uid: 1,
+                        flags: vec![],
+                        internal_date: None,
+                        size_bytes: Some(40),
+                        raw_headers: Some(
+                            b"From: sender@example.com\r\nSubject: Headless arrival\r\n\r\n"
+                                .to_vec(),
+                        ),
+                        raw_rfc822: None,
+                    }]
+                } else {
+                    Vec::new()
+                },
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn headless_engine_receives_inbox_first_and_quiet_checks_skip_full_indexes() {
+        let temporary = tempfile::tempdir().expect("temporary store");
+        let app = crate::mail_runtime::MailRuntime::open(&temporary.path().join("mail.sqlite3"))
+            .expect("headless runtime");
+        let preset = crate::providers::registry::provider_presets()
+            .into_iter()
+            .find(|preset| preset.id == "qq")
+            .expect("preset");
+        let account = app
+            .state
+            .database
+            .lock()
+            .expect("store")
+            .create_account(
+                &crate::domain::account::CreateAccountInput {
+                    email: "test@qq.com".into(),
+                    display_name: "Test".into(),
+                    provider_id: "qq".into(),
+                    secret: "test".into(),
+                    incoming_secret: None,
+                    outgoing_secret: None,
+                    incoming: None,
+                    outgoing: None,
+                },
+                &preset,
+                "test/incoming",
+                "test/outgoing",
+                true,
+                true,
+            )
+            .expect("account");
+        let ui_state = app.state.clone();
+        let backend = HeadlessBackend {
+            calls: Mutex::new(Vec::new()),
+        };
+        let token = app.state.sync.start(&account.id);
+        let first = synchronize_account(
+            &app,
+            &account.id,
+            &backend,
+            "test",
+            &token,
+            SyncMode::Realtime,
+            false,
+        )
+        .await
+        .expect("headless arrival");
+        assert_eq!(first.inserted, 1);
+        assert_eq!(
+            *backend.calls.lock().expect("calls"),
+            vec!["INBOX", "Archive"]
+        );
+        let visible = ui_state
+            .database
+            .lock()
+            .expect("shared UI store")
+            .list_messages_in_scope(Some(&account.id), None, Some("inbox"), None, 20)
+            .expect("UI cache");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].subject, "Headless arrival");
+        assert!(!visible[0].is_read);
+        // The fake backend does not implement full-index retrieval: this would fail if a
+        // quiet watchdog pass still scanned every UID, downloaded bodies or backfilled history.
+        let quiet = synchronize_account(
+            &app,
+            &account.id,
+            &backend,
+            "test",
+            &token,
+            SyncMode::Quick,
+            false,
+        )
+        .await
+        .expect("quiet check");
+        assert_eq!(quiet.inserted, 0);
+        assert_eq!(quiet.updated, 0);
+        assert!(std::sync::Arc::ptr_eq(&ui_state.sync, &app.state.sync));
+        assert!(
+            ui_state.sync.try_start(&account.id).is_none(),
+            "UI and headless service share one sync slot"
+        );
+        app.state.sync.cancel(&account.id);
+    }
+
+    #[test]
+    fn protocol_races_retry_sync_without_changing_mutation_retry_policy() {
+        let error = AppError::Protocol("UIDVALIDITY changed during reconciliation".into());
+        assert!(
+            !error.retryable(),
+            "unsafe remote operations must not be blindly replayed"
+        );
+        assert!(sync_error_status("account-a".into(), error).retryable);
+        assert!(!sync_error_status("account-a".into(), AppError::Authentication).retryable);
+    }
 
     struct FakeBackend {
         snapshots: Mutex<VecDeque<IncomingMailboxSnapshot>>,

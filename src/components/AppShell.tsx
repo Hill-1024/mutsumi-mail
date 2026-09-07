@@ -7,12 +7,15 @@ import {
   type ReactNode,
   type RefObject,
 } from 'react';
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { useLocation } from 'react-router-dom';
+import { useAppNavigation } from '../lib/navigation';
 import type { Account, Mailbox } from '../types';
 import { Icon, type IconName } from '../lib/icons';
 import { applyThemeTokens, getAndroidDynamicColor, paletteSeed } from '../lib/theme';
 import { installContextMenuGuard } from '../lib/context-menu';
-import { useUiStore } from '../stores/ui';
+import { useExitPresence } from '../lib/motion';
+import { updateSettings } from '../lib/tauri';
+import { useUiStore, type UiState } from '../stores/ui';
 
 interface AppShellProps {
   accounts: Account[];
@@ -155,6 +158,11 @@ const mutsumiGreeting = (date: Date) => {
   return '夜深了。';
 };
 
+// Compose and the account wizard own their own Escape/focus behavior; global shortcuts
+// must stand down while either modal is mounted (including during its exit animation).
+const isModalMounted = () =>
+  Boolean(document.querySelector('.compose-dialog, .wizard-dialog'));
+
 const mutsumiDateLabel = (date: Date) =>
   date.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
 
@@ -167,7 +175,7 @@ export function AppShell({
   onAddAccount,
   children,
 }: AppShellProps) {
-  const navigate = useNavigate();
+  const navigate = useAppNavigation();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const dynamicColorRequested = useRef(false);
@@ -186,9 +194,7 @@ export function AppShell({
     selectedMessageId,
     selectMailbox,
     setNavPage,
-    navPage,
     syncMessage,
-    composeOpen,
     setComposeOpen,
     setSearchOpen,
   } = useUiStore();
@@ -199,7 +205,11 @@ export function AppShell({
     (candidate) => candidate.enabled && candidate.outgoingConfigured,
   );
   const mutsumiMode = !androidDynamicColor && themePalette === 'mutsumi';
-  const showMutsumiHero = mutsumiMode && navPage === 'mail' && !selectedMessageId;
+  const navPage: UiState['navPage'] = location.pathname.startsWith('/settings')
+    ? 'settings' : location.pathname.startsWith('/outbox')
+      ? 'outbox' : location.pathname.startsWith('/search') ? 'search' : 'mail';
+  const heroRouteVisible = mutsumiMode && navPage === 'mail';
+  const drawerPresence = useExitPresence(mobileMenuOpen, 260);
   const inboxId = 'inbox';
   const scopeName = selectedAccount
     ? selectedAccount.displayName || selectedAccount.email
@@ -227,27 +237,25 @@ export function AppShell({
     setMobileMenuOpen(false);
   };
   const openMailbox = (mailboxId: string) => {
-    selectMailbox(mailboxId);
-    setAccountMenuSurface(null);
-    setMobileMenuOpen(false);
-    navigate('/mail');
+    navigate('/mail', () => {
+      selectMailbox(mailboxId);
+      setAccountMenuSurface(null);
+      setMobileMenuOpen(false);
+    });
   };
   const openPage = (page: 'outbox' | 'settings') => {
-    setNavPage(page);
-    setAccountMenuSurface(null);
-    setMobileMenuOpen(false);
-    navigate(`/${page}`);
+    navigate(`/${page}`, () => {
+      setAccountMenuSurface(null);
+      setMobileMenuOpen(false);
+    });
   };
   const openAccountMenu = (surface: 'desktop' | 'mobile') => {
     setAccountMenuSurface((current) => (current === surface ? null : surface));
   };
   const selectAccountScope = (accountId: string | null) => {
     onSelectAccount(accountId);
-    selectMailbox('inbox');
-    setNavPage('mail');
     setAccountMenuSurface(null);
     setMobileMenuOpen(false);
-    navigate('/mail');
   };
   const addAccount = () => {
     setAccountMenuSurface(null);
@@ -281,19 +289,19 @@ export function AppShell({
       }))
       .filter((group) => group.mailboxes.length > 0);
   }, [accounts, mailboxes, selectedAccountId]);
+  const scopedSyncAccounts = selectedAccount ? [selectedAccount] : accounts;
   const syncLabel = (() => {
     if (accounts.length === 0) return '未配置账户';
     if (syncMessage) return syncMessage;
-    const scopedAccounts = selectedAccount ? [selectedAccount] : accounts;
-    if (scopedAccounts.some((candidate) => candidate.syncStatus === 'syncing')) return '正在同步';
-    const problemCount = scopedAccounts.filter(
+    if (scopedSyncAccounts.some((candidate) => candidate.syncStatus === 'syncing')) return '正在同步';
+    const problemCount = scopedSyncAccounts.filter(
       (candidate) => candidate.syncStatus === 'offline' || candidate.syncStatus === 'error',
     ).length;
     if (problemCount > 0)
       return selectedAccount
         ? accountStatusLabel(selectedAccount)
         : `${problemCount} 个账户同步异常`;
-    const lastSyncedAt = scopedAccounts
+    const lastSyncedAt = scopedSyncAccounts
       .map((candidate) => candidate.lastSyncedAt)
       .filter((value): value is string => Boolean(value))
       .sort()
@@ -304,6 +312,9 @@ export function AppShell({
       ? '已同步'
       : `上次同步 ${syncedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
   })();
+  const isSyncing =
+    scopedSyncAccounts.some((candidate) => candidate.syncStatus === 'syncing') ||
+    syncLabel.startsWith('正在同步');
 
   // Synchronize route changes with navPage
   useEffect(() => {
@@ -445,6 +456,11 @@ export function AppShell({
         return;
       }
 
+      // Compose and the account wizard fully own the keyboard while mounted: the
+      // dialog decides whether Escape discards or confirms, and shortcuts like ⌘K
+      // or `c` must not act on UI hidden underneath a modal.
+      if (isModalMounted()) return;
+
       // ⌘K or Ctrl+K to search
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
@@ -454,12 +470,9 @@ export function AppShell({
         return;
       }
 
-      // Escape to close modals or return from search
+      // Escape returns from search. The compose dialog is intentionally not handled
+      // here: it has its own Escape flow that guards unsaved drafts.
       if (event.key === 'Escape') {
-        if (composeOpen) {
-          setComposeOpen(false);
-          return;
-        }
         if (location.pathname === '/search') {
           setNavPage('mail');
           navigate('/mail');
@@ -491,7 +504,6 @@ export function AppShell({
   }, [
     accountMenuSurface,
     canCompose,
-    composeOpen,
     location.pathname,
     mobileMenuOpen,
     navigate,
@@ -521,6 +533,9 @@ export function AppShell({
       className={`app-shell ${navPage === 'mail' && selectedMessageId ? 'is-reading-message' : ''}`}
       data-special-theme={mutsumiMode ? 'mutsumi' : undefined}
     >
+      {/* Ambient backdrop for Mutsumi mode only (CSS keeps it display:none otherwise):
+          a large, heavily blurred character layer that frosted surfaces glow through. */}
+      <div className="mutsumi-wallpaper" aria-hidden="true" />
       <aside className="sidebar" aria-label="邮箱导航" inert={mobileMenuOpen ? true : undefined}>
         <button
           className="rail-menu-trigger icon-button"
@@ -574,21 +589,16 @@ export function AppShell({
             />
             <span>星标邮件</span>
           </button>
-          <NavLink
-            className={({ isActive }) => `nav-item ${isActive ? 'is-active' : ''}`}
-            to="/outbox"
+          <button
+            className={`nav-item ${navPage === 'outbox' ? 'is-active' : ''}`}
+            type="button"
             aria-label="发件箱"
-            onClick={() => {
-              setNavPage('outbox');
-              setMobileMenuOpen(false);
-            }}
+            aria-current={navPage === 'outbox' ? 'page' : undefined}
+            onClick={() => openPage('outbox')}
           >
-            <Icon
-              name={location.pathname.startsWith('/outbox') ? 'sendClockFilled' : 'sendClock'}
-              size={20}
-            />
+            <Icon name={navPage === 'outbox' ? 'sendClockFilled' : 'sendClock'} size={20} />
             <span>发件箱</span>
-          </NavLink>
+          </button>
         </nav>
 
         <nav className="folder-nav" aria-label="文件夹列表">
@@ -694,7 +704,7 @@ export function AppShell({
           </div>
           <div className="topbar-actions">
             <div
-              className={`sync-chip ${accounts.length === 0 ? 'is-unconfigured' : (selectedAccount ? ['offline', 'error'].includes(selectedAccount.syncStatus) : accounts.some((candidate) => candidate.syncStatus === 'offline' || candidate.syncStatus === 'error')) ? 'is-offline' : ''}`}
+              className={`sync-chip ${accounts.length === 0 ? 'is-unconfigured' : (selectedAccount ? ['offline', 'error'].includes(selectedAccount.syncStatus) : accounts.some((candidate) => candidate.syncStatus === 'offline' || candidate.syncStatus === 'error')) ? 'is-offline' : ''} ${isSyncing ? 'is-syncing' : ''}`}
               role="status"
               aria-live="polite"
             >
@@ -704,12 +714,20 @@ export function AppShell({
             <button
               className="icon-button topbar-theme-action"
               onClick={() => {
-                setThemeMode(themeMode === 'dark' ? 'light' : 'dark');
+                const next = themeMode === 'dark' ? 'light' : 'dark';
+                setThemeMode(next);
+                // Persist so opening Settings later does not silently revert this toggle.
+                void updateSettings({ theme: next }).catch(() => undefined);
               }}
               aria-label="切换主题"
               title={themeMode === 'dark' ? '切换至浅色模式' : '切换至深色模式'}
             >
-              <Icon name={themeMode === 'dark' ? 'sun' : 'moon'} size={20} />
+              <Icon
+                key={themeMode === 'dark' ? 'sun' : 'moon'}
+                className="theme-swap-icon"
+                name={themeMode === 'dark' ? 'sun' : 'moon'}
+                size={20}
+              />
             </button>
             <button
               className="icon-button"
@@ -725,16 +743,28 @@ export function AppShell({
             </button>
           </div>
         </header>
-        {showMutsumiHero ? (
-          <section className="mutsumi-hero" aria-label="今日问候">
-            <div className="mutsumi-hero-art" aria-hidden="true" />
-            <div className="mutsumi-hero-copy">
-              <p className="mutsumi-hero-greeting">{mutsumiGreeting(now)}</p>
-              <p className="mutsumi-hero-tagline">……嗯，今天也请多指教。</p>
-              <p className="mutsumi-hero-date">{mutsumiDateLabel(now)}</p>
+        {heroRouteVisible && (
+          <div
+            className={`mutsumi-hero-region ${selectedMessageId ? 'is-leaving' : ''}`}
+            aria-hidden={Boolean(selectedMessageId)}
+          >
+            <div className="mutsumi-hero-clip">
+              {(
+                <section
+                  className="mutsumi-hero no-entrance"
+                  aria-label="今日问候"
+                >
+                  <div className="mutsumi-hero-art" aria-hidden="true" />
+                  <div className="mutsumi-hero-copy">
+                    <p className="mutsumi-hero-greeting">{mutsumiGreeting(now)}</p>
+                    <p className="mutsumi-hero-tagline">……嗯，今天也请多指教。</p>
+                    <p className="mutsumi-hero-date">{mutsumiDateLabel(now)}</p>
+                  </div>
+                </section>
+              )}
             </div>
-          </section>
-        ) : null}
+          </div>
+        )}
         <div className="workspace-content">{children}</div>
       </main>
 
@@ -809,10 +839,11 @@ export function AppShell({
         </button>
       </nav>
 
-      {mobileMenuOpen && (
+      {drawerPresence.mounted && (
         <div
-          className="mobile-nav-scrim"
+          className={`mobile-nav-scrim ${drawerPresence.exiting ? 'is-exiting' : ''}`}
           role="presentation"
+          onAnimationEnd={drawerPresence.handleAnimationEnd}
           onMouseDown={(event) => {
             if (event.target === event.currentTarget) closeMobileMenu();
           }}
@@ -820,7 +851,7 @@ export function AppShell({
           <aside
             ref={drawerRef}
             id="mobile-folder-drawer"
-            className="mobile-nav-drawer"
+            className={`mobile-nav-drawer ${drawerPresence.exiting ? 'is-exiting' : ''}`}
             role="dialog"
             aria-modal="true"
             aria-label="账户与文件夹"

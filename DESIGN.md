@@ -80,6 +80,15 @@
   - 问候语：`title-large` 500；日期：`label-medium` `on-surface-variant`。文案随时间变化（5–11 早上好 / 11–13 中午好 / 13–18 下午好 / 18–23 晚上好 / 其他 夜深了）。
 - **调色板选择器**：`data-palette-id='mutsumi'` 的 swatch 使用 `mutsumi-avatar.webp` 头像裁切。
 - 侧栏顶部叠加 `primary-container` 8% 的同族渐变；列表选中丸不变（严格 MD3）。
+- **Hero 动效**（全部 token 派生，`prefers-reduced-motion` 下随全局规则静默）：
+  - 入场：立绘 `mutsumi-art-in`（`translate` 右侧 28px 漂移归位 + 淡入，extra-long emphasized）；文案三行 `mutsumi-copy-in` 依次 stagger（70ms 步进，上滑 10px）。
+  - 常驻：立绘 `mutsumi-art-breathe`（`scale` 1→1.012，9s alternate，origin 右下）与渐变场高光 `mutsumi-glow-pan`（16s alternate 极缓平移）。动效分解在独立的 `scale`/`translate` 属性上，互不复写。
+  - 离场沿用 `hero-leave`（上滑淡出），与阅读器 `reader-enter` 衔接。
+- **空状态水印**：`empty-reader` / `account-empty-state` 在睦头模式下右下角叠加 10% 透明度立绘（`mask-image` 渐隐，`aria-hidden` 装饰，纯 token 布局）。
+- **撰写按钮**：睦头模式追加 1px 发丝内描边（`primary` 34%，hover 提升至 48%），其余状态严格沿用 MD3。
+- **氛围层（借鉴 mutsumi.moe / Mizuki 语法）**：`.mutsumi-wallpaper` 固定全屏层（右下锚定立绘，`blur(28px)`+12% 透明度暗色 / 9% 亮色，`scale(1.14)` 防止模糊边缘漏出）；主要表面转半透明磨砂 —— 侧栏 82%、顶栏 66%（blur 20px）、列表 80%、阅读 72%（blur 16px）。`app-shell` 背景转透明让壁纸透出。其他主题零开销（层 `display:none`，表面保持不透明）。
+- **Hero 折叠**：邮件页内保留 hero 节点，通过 `.mutsumi-hero-region` 的 `grid-template-rows 1fr→0fr` 平滑折叠（240ms emphasized）。导航及选中项在同一次 View Transition 回调中提交；快照期间禁用高度过渡，避免捕获中间布局。
+- **路由过渡**：旧快照明确置于新快照之上，旧页 240ms 淡出、新页保持不透明，均使用 normal 合成。阅读器入场只播放一次，路由快照内不播放；结束过渡时不得重启入场动画。连续导航取消旧过渡及其过期回调，减少动态效果时直接切换。
 - **禁止**：硬编码浅色文字（旧版问题）；粉紫渐变；非 token 圆角。
 
 ## 8. 无障碍约束

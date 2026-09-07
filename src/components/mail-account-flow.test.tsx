@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { act } from 'react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
@@ -16,6 +16,7 @@ const apiMocks = vi.hoisted(() => ({
   deleteMessages: vi.fn(),
   fetchMessageBody: vi.fn(),
   getSettings: vi.fn(),
+  getMessage: vi.fn(),
   listAccounts: vi.fn(),
   listMailboxes: vi.fn(),
   listMessages: vi.fn(),
@@ -351,7 +352,7 @@ describe('邮箱账户关键流程', () => {
 
   it('零账户启动时显示主界面空状态与设置入口，不强制弹出添加邮箱', async () => {
     window.history.replaceState({}, '', '/settings');
-    render(<App />);
+    render(<App client={new QueryClient({ defaultOptions: { queries: { retry: false } } })} />);
 
     expect(await screen.findByRole('heading', { name: '尚未添加邮箱' })).toBeTruthy();
     expect(window.location.pathname).toBe('/mail');
@@ -489,6 +490,127 @@ describe('邮箱账户关键流程', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // 并发标志变更：自动已读 in-flight 时用户点击切换，图标/加粗/圆点必须始终
+  // 与最新（用户的）意图一致，且任何一方释放不得清掉更新的乐观值。
+  // ---------------------------------------------------------------------------
+  interface Deferred<T> {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (reason?: unknown) => void;
+  }
+
+  const deferred = <T,>(): Deferred<T> => {
+    let resolve!: (value: T) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
+  const renderMailHome = (messages: Message[]) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    let server = messages;
+    const key = ['messages', 'all', 'inbox'];
+    client.setQueryData(key, messages);
+    function TestHome() {
+      const result = useQuery({ queryKey: key, queryFn: () => server });
+      return <MailHome hasAccounts accounts={[account()]} messages={result.data ?? []} mailboxes={[]} isLoading={false} onOpenSettings={vi.fn()} />;
+    }
+    const utils = render(<QueryClientProvider client={client}><MemoryRouter><TestHome /></MemoryRouter></QueryClientProvider>);
+    return {
+      ...utils,
+      rerenderMessages(next: Message[]) {
+        server = next;
+        act(() => client.setQueryData(key, next));
+      },
+      setServer(next: Message[]) { server = next; },
+    };
+  };
+
+  const rowVisualState = () => {
+    const row = screen.getByRole('listitem');
+    return {
+      icon: row
+        .querySelector('.row-read-toggle [data-testid^="icon-"]')
+        ?.getAttribute('data-testid'),
+      unreadDot: row.querySelector('.unread-dot') !== null,
+      boldUnread: row.classList.contains('is-unread'),
+    };
+  };
+
+  it('自动已读在途时用户切回未读：图标与状态始终跟随用户，不被在途操作回滚', async () => {
+    const autoReadCall = deferred<Message>();
+    const userToggleCall = deferred<Message>();
+    let call = 0;
+    apiMocks.mutateMessage.mockImplementation(() => {
+      call += 1;
+      return call === 1 ? autoReadCall.promise : userToggleCall.promise;
+    });
+
+    const view = renderMailHome([message({ isRead: false })]);
+    // 1) 打开即自动标记已读（在途）。
+    await waitFor(() => expect(apiMocks.mutateMessage).toHaveBeenCalledTimes(1));
+    expect(rowVisualState()).toMatchObject({ icon: 'icon-markUnread', unreadDot: false });
+
+    // 2) 用户点击“标记为未读”（自动已读仍未完成）。
+    fireEvent.click(screen.getByRole('button', { name: '标记为未读' }));
+    await waitFor(() => expect(rowVisualState()).toMatchObject({ icon: 'icon-markRead', unreadDot: true }));
+    expect(apiMocks.mutateMessage).toHaveBeenCalledTimes(1);
+
+    // 3) 自动已读先落地，refetch 返回后端事实 isRead:true —— 用户较新的未读意图必须保留。
+    autoReadCall.resolve(message({ isRead: true }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(apiMocks.mutateMessage).toHaveBeenCalledTimes(2));
+    expect(rowVisualState()).toMatchObject({ icon: 'icon-markRead', unreadDot: true });
+
+    // 4) 用户的操作落地，refetch 返回 isRead:false，乐观值随释放移除，状态稳定。
+    view.setServer([message({ isRead: false })]);
+    userToggleCall.resolve(message({ isRead: false }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(rowVisualState()).toMatchObject({ icon: 'icon-markRead', unreadDot: true }));
+    expect(rowVisualState()).toMatchObject({ icon: 'icon-markRead', unreadDot: true, boldUnread: true });
+    expect(apiMocks.mutateMessage).toHaveBeenCalledTimes(2);
+  }, 15_000);
+
+  it('第一次切换失败时干净回滚，第二次点击成功后状态与图标一致', async () => {
+    const firstCall = deferred<Message>();
+    let call = 0;
+    apiMocks.mutateMessage.mockImplementation(() => {
+      call += 1;
+      if (call === 1) return firstCall.promise;
+      return Promise.resolve(message({ isRead: false }));
+    });
+
+    const view = renderMailHome([message({ isRead: true })]);
+    expect(rowVisualState()).toMatchObject({ icon: 'icon-markUnread', unreadDot: false });
+
+    // 第一次点击失败：乐观未读释放，干净回滚到已读，不留中间态。
+    fireEvent.click(screen.getByRole('button', { name: '标记为未读' }));
+    await waitFor(() =>
+      expect(rowVisualState()).toMatchObject({ icon: 'icon-markRead', unreadDot: true }),
+    );
+    firstCall.reject({ message: '网络连接失败' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(useUiStore.getState().syncMessage).toBeTruthy());
+    expect(rowVisualState()).toMatchObject({ icon: 'icon-markUnread', unreadDot: false });
+
+    // 第二次点击成功：稳定未读。
+    view.setServer([message({ isRead: false })]);
+    fireEvent.click(screen.getByRole('button', { name: '标记为未读' }));
+    await waitFor(() => expect(apiMocks.mutateMessage).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(rowVisualState()).toMatchObject({ icon: 'icon-markRead', unreadDot: true }));
+    expect(rowVisualState()).toMatchObject({ icon: 'icon-markRead', unreadDot: true, boldUnread: true });
+  }, 15_000);
+
   it('邮件列表支持批量标记已读和移至回收站', async () => {
     const first = message();
     const second = message({
@@ -597,4 +719,57 @@ it('旧正文更新失败时仍保留缓存内容并允许重试', async () => {
   fireEvent.click(screen.getByRole('button', { name: '重试' }));
   await waitFor(() => expect((screen.getByTitle('邮件正文') as HTMLIFrameElement).srcdoc).toContain('<p>恢复原文</p>'));
   expect(apiMocks.fetchMessageBody).toHaveBeenCalledTimes(2);
+});
+
+it('键盘操作邮件行内按钮不会冒泡为打开邮件', () => {
+  const onSelect = vi.fn();
+  render(<MemoryRouter><MessageList accounts={[account()]} messages={[message()]} onSelect={onSelect} onToggle={vi.fn()} onBulkMutate={vi.fn()} onBulkDelete={vi.fn()} /></MemoryRouter>);
+  fireEvent.keyDown(screen.getByRole('button', { name: '标记为已读' }), { key: 'Enter' });
+  fireEvent.keyDown(screen.getByRole('button', { name: '加星标' }), { key: ' ' });
+  expect(onSelect).not.toHaveBeenCalled();
+  fireEvent.keyDown(screen.getByRole('listitem'), { key: 'Enter' });
+  expect(onSelect).toHaveBeenCalledWith('message-1');
+});
+
+it('旧文件夹占位数据不会清掉目标选中邮件或触发自动已读', () => {
+  useUiStore.setState({ selectedMessageId: 'target' });
+  render(withQueryClient(<MemoryRouter><MailHome hasAccounts accounts={[account()]} messages={[message()]} mailboxes={[]} isLoading={false} isRefreshing onOpenSettings={vi.fn()} /></MemoryRouter>));
+  expect(useUiStore.getState().selectedMessageId).toBe('target');
+  expect(apiMocks.mutateMessage).not.toHaveBeenCalled();
+  expect(document.querySelector('.message-list-shell')?.hasAttribute('inert')).toBe(true);
+});
+
+it('删除完成时不能把用户后来选中的邮件切走', async () => {
+  const first = message({ isRead: true }); const second = message({ id: 'second', subject: '第二封', isRead: true });
+  let finish!: (value: { deleted: number }) => void;
+  apiMocks.deleteMessages.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  useUiStore.setState({ selectedMessageId: first.id });
+  render(withQueryClient(<MemoryRouter><MailHome hasAccounts accounts={[account()]} messages={[first, second]} mailboxes={[]} isLoading={false} onOpenSettings={vi.fn()} /></MemoryRouter>));
+  fireEvent.click(screen.getByRole('button', { name: '删除' }));
+  await waitFor(() => expect(apiMocks.deleteMessages).toHaveBeenCalledOnce());
+  fireEvent.click(screen.getAllByRole('listitem')[1]);
+  await act(async () => finish({ deleted: 1 }));
+  expect(useUiStore.getState().selectedMessageId).toBe(second.id);
+});
+
+it('缓存已有正文的邮件仍会读取附件列表', async () => {
+  const original = message({ isRead: true, hasAttachment: true, attachmentCount: 1 });
+  apiMocks.fetchMessageBody.mockResolvedValue({ ...original, attachments: [{ id: 'attachment', filename: 'report.pdf', contentType: 'application/pdf', sizeBytes: 100 }] });
+  render(withQueryClient(<MemoryRouter><MailHome hasAccounts accounts={[account()]} messages={[original]} mailboxes={[]} isLoading={false} onOpenSettings={vi.fn()} /></MemoryRouter>));
+  await screen.findByText('report.pdf');
+  expect(apiMocks.fetchMessageBody).toHaveBeenCalledOnce();
+});
+
+it('搜索选择超出文件夹前 200 封范围的邮件时按实例读取，保留选中项', async () => {
+  const old = message({ id: 'old-result', subject: '旧邮件搜索命中', isRead: true });
+  const recent = message({ id: 'recent', isRead: true });
+  apiMocks.listAccounts.mockResolvedValue([account()]);
+  apiMocks.listMailboxes.mockResolvedValue([{ id: old.mailboxId, accountId: old.accountId, specialRole: 'inbox', unreadCount: 0, totalCount: 300 }]);
+  apiMocks.listMessages.mockResolvedValue([recent]);
+  apiMocks.getMessage.mockResolvedValue(old);
+  useUiStore.setState({ selectedMailboxId: old.mailboxId, selectedMessageId: old.id });
+  render(<App client={new QueryClient({ defaultOptions: { queries: { retry: false } } })} />);
+  await waitFor(() => expect(document.querySelector('.reader-subject')?.textContent).toBe(old.subject));
+  expect(useUiStore.getState().selectedMessageId).toBe(old.id);
+  expect(apiMocks.getMessage).toHaveBeenCalledWith(old.id, old.mailboxId);
 });

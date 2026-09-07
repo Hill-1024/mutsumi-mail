@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useAppNavigation } from '../lib/navigation';
+import { messageInstanceKey } from '../lib/optimistic-flags';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Account, Message } from '../types';
 import { Icon } from '../lib/icons';
+import { useChangePulse } from '../lib/motion';
 import { useUiStore } from '../stores/ui';
 
 interface MessageListProps {
@@ -18,10 +20,10 @@ interface MessageListProps {
   onBulkDelete: (messages: Message[]) => Promise<void> | void;
   onRefresh?: () => void;
   isLoading?: boolean;
+  isRefreshing?: boolean;
+  loadError?: string;
+  onRetry?: () => void;
 }
-
-const messageInstanceKey = (message: Pick<Message, 'id' | 'mailboxId'>) =>
-  `${message.id}\u0000${message.mailboxId}`;
 
 const formatTime = (value: string) => {
   const date = new Date(value);
@@ -48,10 +50,13 @@ export function MessageList({
   onBulkDelete,
   onRefresh,
   isLoading,
+  isRefreshing = false,
+  loadError,
+  onRetry,
 }: MessageListProps) {
   const parentRef = useRef<HTMLDivElement>(null);
   const { setSearchOpen, setNavPage } = useUiStore();
-  const navigate = useNavigate();
+  const navigate = useAppNavigation();
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedMessageKeys, setSelectedMessageKeys] = useState<Set<string>>(() => new Set());
   const [bulkActionPending, setBulkActionPending] = useState(false);
@@ -66,7 +71,21 @@ export function MessageList({
     getScrollElement: () => parentRef.current,
     estimateSize: () => 92,
     overscan: 8,
+    getItemKey: (index) => messageInstanceKey(messages[index]),
   });
+
+  // Arrow-key navigation moves focus between rows and scrolls them into view.
+  const focusRow = (index: number) => {
+    const clamped = Math.max(0, Math.min(messages.length - 1, index));
+    virtualizer.scrollToIndex(clamped);
+    // scrollToIndex is synchronous for the target position; the element may still be
+    // mounting, so retry on the next frame before giving up.
+    requestAnimationFrame(() => {
+      parentRef.current
+        ?.querySelector<HTMLElement>(`[data-index="${clamped}"]`)
+        ?.focus();
+    });
+  };
 
   const unreadCount = messages.filter((message) => !message.isRead).length;
   const selectedMessages = useMemo(
@@ -121,7 +140,7 @@ export function MessageList({
   };
 
   return (
-    <div className="message-list-shell">
+    <div className="message-list-shell" inert={isRefreshing || undefined}>
       <div className="list-toolbar">
         {bulkMode ? (
           <div className="list-toolbar-status list-selection-summary" aria-live="polite">
@@ -141,9 +160,9 @@ export function MessageList({
         ) : (
           <div className="list-toolbar-status">
             <span className="muted-count">
-              {unreadCount > 0 ? `${unreadCount} 封未读` : '全部已读'}
+              {unreadCount > 0 ? `${unreadCount} 封未读` : '当前列表全部已读'}
             </span>
-            <span className="list-total-count">共 {messages.length} 封</span>
+            <span className="list-total-count">已载入 {messages.length} 封</span>
           </div>
         )}
         <div className="list-toolbar-actions">
@@ -194,7 +213,7 @@ export function MessageList({
           ) : (
             <>
               <button
-                className="icon-button"
+                className={`icon-button ${isRefreshing ? 'is-busy' : ''}`}
                 type="button"
                 onClick={onRefresh}
                 aria-label="刷新邮件"
@@ -227,8 +246,19 @@ export function MessageList({
         />
         <kbd className="search-shortcut">⌘ K</kbd>
       </div>
-      <div ref={parentRef} className="virtual-list" role="list" aria-label="已缓存邮件">
-        {isLoading ? (
+      <div
+        ref={parentRef}
+        className={`virtual-list ${isRefreshing ? 'is-refreshing' : ''}`}
+        role="list"
+        aria-label="已缓存邮件"
+        aria-busy={isRefreshing || undefined}
+      >
+        {loadError ? (
+          <div className="list-loading" role="alert">
+            <p>{loadError}</p>
+            <button className="text-action" type="button" onClick={onRetry}>重试</button>
+          </div>
+        ) : isLoading ? (
           <div className="list-loading">
             <span className="spinner" />
             <span>正在读取本地邮件…</span>
@@ -245,7 +275,9 @@ export function MessageList({
               const message = messages[item.index];
               return (
                 <MessageRow
-                  key={message.id}
+                  key={messageInstanceKey(message)}
+                  index={item.index}
+                  measureRef={virtualizer.measureElement}
                   message={message}
                   accountLabel={
                     accounts.length > 1
@@ -258,6 +290,7 @@ export function MessageList({
                   onSelect={onSelect}
                   onToggle={(mutation) => onToggle(message.id, mutation)}
                   onToggleSelection={() => toggleSelection(message)}
+                  onNavigate={focusRow}
                   style={{ transform: `translateY(${item.start}px)` }}
                 />
               );
@@ -270,6 +303,8 @@ export function MessageList({
 }
 
 function MessageRow({
+  index,
+  measureRef,
   message,
   accountLabel,
   selected,
@@ -278,8 +313,11 @@ function MessageRow({
   onSelect,
   onToggle,
   onToggleSelection,
+  onNavigate,
   style,
 }: {
+  index: number;
+  measureRef: (element: HTMLElement | null) => void;
   message: Message;
   accountLabel?: string;
   selected: boolean;
@@ -288,17 +326,43 @@ function MessageRow({
   onSelect: (id: string) => void;
   onToggle: (mutation: { isRead?: boolean; isStarred?: boolean }) => void;
   onToggleSelection: () => void;
+  onNavigate: (index: number) => void;
   style: CSSProperties;
 }) {
   const avatarLetter =
     message.from.name?.slice(0, 1) ?? message.from.email.slice(0, 1).toUpperCase();
+  // Pulse counters key the icons so the spring pop replays on real toggles only —
+  // a fresh mount (row scrolling back into the virtual window) stays silent.
+  const starPulse = useChangePulse(message.isStarred);
+  const readPulse = useChangePulse(message.isRead);
+  const checkPulse = useChangePulse(multiSelected);
+
+  const handleKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onSelect(message.id);
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      onNavigate(index + 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      onNavigate(index - 1);
+    }
+  };
 
   return (
     <article
+      ref={measureRef}
+      data-index={index}
+      tabIndex={0}
       className={`message-row ${selected ? 'is-selected' : ''} ${multiSelected ? 'is-multi-selected' : ''} ${message.isRead ? '' : 'is-unread'}`}
       style={style}
       role="listitem"
       onClick={() => onSelect(message.id)}
+      onKeyDown={handleKeyDown}
     >
       {bulkMode && (
         <button
@@ -315,7 +379,7 @@ function MessageRow({
             onToggleSelection();
           }}
         >
-          <Icon name="check" size={17} />
+          <Icon key={`check-${checkPulse}`} name="check" size={17} className={checkPulse ? 'icon-spring-in' : undefined} />
         </button>
       )}
       <div className="row-avatar">{avatarLetter}</div>
@@ -343,7 +407,12 @@ function MessageRow({
             onToggle({ isStarred: !message.isStarred });
           }}
         >
-          <Icon name={message.isStarred ? 'starFilled' : 'star'} size={18} />
+          <Icon
+            key={`star-${starPulse}`}
+            name={message.isStarred ? 'starFilled' : 'star'}
+            size={18}
+            className={starPulse ? 'icon-spring-star' : undefined}
+          />
         </button>
         {message.hasAttachment && (
           <Icon name="paperclip" size={16} className="attachment-icon" title="包含附件" />
@@ -357,7 +426,12 @@ function MessageRow({
             onToggle({ isRead: !message.isRead });
           }}
         >
-          <Icon name={message.isRead ? 'check' : 'clock'} size={16} />
+          <Icon
+            key={`read-${readPulse}`}
+            name={message.isRead ? 'markUnread' : 'markRead'}
+            size={16}
+            className={readPulse ? 'icon-spring-in' : undefined}
+          />
         </button>
       </div>
     </article>
