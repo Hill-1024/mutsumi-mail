@@ -28,11 +28,17 @@ pub fn run() {
     let builder = builder
         .plugin(all_files_access::init())
         .plugin(dynamic_color::init());
-    #[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+    #[cfg(all(
+        feature = "desktop-shell",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     let autostart = tauri_plugin_autostart::Builder::new().args(["--background"]);
-    #[cfg(all(not(test), target_os = "macos"))]
+    #[cfg(all(feature = "desktop-shell", target_os = "macos"))]
     let autostart = autostart.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
-    #[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+    #[cfg(all(
+        feature = "desktop-shell",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
     let builder = builder
         .plugin(autostart.build())
         .plugin(tauri_plugin_single_instance::init(
@@ -72,7 +78,10 @@ pub fn run() {
                 .ok();
             let app_handle = app.handle().clone();
             runtime.attach(app_handle.clone());
-            #[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+            #[cfg(all(
+                feature = "desktop-shell",
+                not(any(target_os = "android", target_os = "ios"))
+            ))]
             if let Err(error) = background::desktop::init(&app_handle) {
                 tracing::warn!(%error, "system tray unavailable; closing the window will exit");
                 // A login launch starts hidden. Keep a reachable window if the desktop cannot
@@ -140,7 +149,10 @@ pub fn run() {
         .build({
             #[allow(unused_mut)]
             let mut context = tauri::generate_context!();
-            #[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+            #[cfg(all(
+                feature = "desktop-shell",
+                not(any(target_os = "android", target_os = "ios"))
+            ))]
             if std::env::args().any(|arg| arg == "--background") {
                 for window in &mut context.config_mut().app.windows {
                     window.visible = false;
@@ -155,7 +167,13 @@ pub fn run() {
         }
     };
     app.run(|app, event| {
-        #[cfg(test)]
+        #[cfg(any(
+            test,
+            all(
+                not(feature = "desktop-shell"),
+                not(any(target_os = "android", target_os = "ios"))
+            )
+        ))]
         let _ = (app, &event);
         // Android keeps the process hosting this runtime alive with MailSyncService. Do not
         // suspend IMAP IDLE when the Activity loses focus: that includes removing the UI task.
@@ -182,7 +200,10 @@ pub fn run() {
             }
             _ => {}
         }
-        #[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+        #[cfg(all(
+            feature = "desktop-shell",
+            not(any(target_os = "android", target_os = "ios"))
+        ))]
         {
             if let tauri::RunEvent::WindowEvent {
                 label,

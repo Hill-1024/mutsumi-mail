@@ -6,6 +6,10 @@ authors = ["Mutsumi Mail contributors"]
 edition = "2021"
 rust-version = "1.85"
 
+[features]
+default = ["desktop-shell"]
+desktop-shell = ["tauri/tray-icon", "dep:tauri-plugin-autostart"]
+
 [lib]
 name = "mutsumi_mail_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
@@ -45,8 +49,7 @@ uuid = { version = "1.18.1", features = ["v4", "serde"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
-tauri = { version = "2.11.5", features = ["tray-icon"] }
-tauri-plugin-autostart = "2"
+tauri-plugin-autostart = { version = "2", optional = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 # `native-tls` is shared by IMAP and SMTP. On Android it needs a target OpenSSL,

@@ -3,10 +3,16 @@
 
 #[cfg(target_os = "android")]
 pub mod android;
-#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(all(
+    feature = "desktop-shell",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub mod desktop;
 
-#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+#[cfg(all(
+    not(feature = "desktop-shell"),
+    not(any(target_os = "android", target_os = "ios"))
+))]
 mod desktop {
     use crate::errors::AppError;
     use tauri::AppHandle;

@@ -74,7 +74,7 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
         working-directory: src-tauri
       - name: Run Rust tests
-        run: cargo test --locked --lib --all-features
+        run: cargo test --locked --lib --no-default-features
         working-directory: src-tauri
       - name: Smoke test Windows desktop startup
         if: matrix.os == 'windows-latest'
