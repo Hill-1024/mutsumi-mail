@@ -75,15 +75,24 @@ jobs:
         working-directory: src-tauri
       - name: Run Rust tests
         if: matrix.os != 'windows-latest'
-        run: cargo test --locked --lib --no-default-features
+        shell: bash
         working-directory: src-tauri
+        run: |
+          mv capabilities/default.json capabilities/default.json.disabled
+          trap 'mv capabilities/default.json.disabled capabilities/default.json' EXIT
+          cargo test --locked --lib --no-default-features
       - name: Run Rust tests and diagnose Windows loader failures
         if: matrix.os == 'windows-latest'
         shell: pwsh
         working-directory: src-tauri
         run: |
-          cargo test --locked --lib --no-default-features
-          $testExit = $LASTEXITCODE
+          Move-Item "capabilities/default.json" "capabilities/default.json.disabled"
+          try {
+            cargo test --locked --lib --no-default-features
+            $testExit = $LASTEXITCODE
+          } finally {
+            Move-Item "capabilities/default.json.disabled" "capabilities/default.json"
+          }
           if ($testExit -ne 0) {
             $testBinary = Get-ChildItem ".\target\debug\deps\mutsumi_mail_lib-*.exe" |
               Sort-Object LastWriteTime -Descending |
