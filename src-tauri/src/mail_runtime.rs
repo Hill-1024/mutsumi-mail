@@ -6,7 +6,7 @@ use std::sync::{Arc, RwLock};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
-#[cfg(not(target_os = "android"))]
+#[cfg(all(not(test), not(target_os = "android")))]
 use tauri_plugin_notification::NotificationExt;
 
 use crate::app_state::AppState;
@@ -67,7 +67,7 @@ impl MailRuntime {
     pub fn notify_new_mail(&self, inserted: usize) {
         #[cfg(target_os = "android")]
         crate::background::android::notify_new_mail(inserted);
-        #[cfg(not(target_os = "android"))]
+        #[cfg(all(not(test), not(target_os = "android")))]
         if let Some(app) = self.app.read().ok().and_then(|app| app.clone()) {
             if let Err(error) = app
                 .notification()
@@ -80,5 +80,7 @@ impl MailRuntime {
                 tracing::debug!(%error, "new-mail notification was not delivered");
             }
         }
+        #[cfg(all(test, not(target_os = "android")))]
+        let _ = inserted;
     }
 }
