@@ -30,13 +30,12 @@ pub fn run() {
         .plugin(all_files_access::init())
         .plugin(dynamic_color::init());
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let autostart = tauri_plugin_autostart::Builder::new().args(["--background"]);
+    #[cfg(target_os = "macos")]
+    let autostart = autostart.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let builder = builder
-        .plugin(
-            tauri_plugin_autostart::Builder::new()
-                .macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent)
-                .args(["--background"])
-                .build(),
-        )
+        .plugin(autostart.build())
         .plugin(tauri_plugin_single_instance::init(
             |app, _arguments, _working_directory| {
                 if let Some(window) = app.get_webview_window("main") {
