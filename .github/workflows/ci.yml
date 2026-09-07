@@ -74,8 +74,30 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
         working-directory: src-tauri
       - name: Run Rust tests
+        if: matrix.os != 'windows-latest'
         run: cargo test --locked --lib --no-default-features
         working-directory: src-tauri
+      - name: Run Rust tests and diagnose Windows loader failures
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        working-directory: src-tauri
+        run: |
+          cargo test --locked --lib --no-default-features
+          $testExit = $LASTEXITCODE
+          if ($testExit -ne 0) {
+            $testBinary = Get-ChildItem ".\target\debug\deps\mutsumi_mail_lib-*.exe" |
+              Sort-Object LastWriteTime -Descending |
+              Select-Object -First 1
+            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+            $visualStudio = & $vswhere -latest -property installationPath
+            $dumpbin = Get-ChildItem "$visualStudio\VC\Tools\MSVC" -Filter dumpbin.exe -Recurse |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+            Write-Host "Windows loader diagnostics for $($testBinary.FullName)"
+            & $dumpbin.FullName /dependents $testBinary.FullName
+            & $dumpbin.FullName /imports $testBinary.FullName
+          }
+          exit $testExit
       - name: Smoke test Windows desktop startup
         if: matrix.os == 'windows-latest'
         shell: pwsh
