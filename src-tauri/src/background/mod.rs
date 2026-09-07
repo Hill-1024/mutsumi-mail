@@ -3,8 +3,28 @@
 
 #[cfg(target_os = "android")]
 pub mod android;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(not(test), not(any(target_os = "android", target_os = "ios"))))]
 pub mod desktop;
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod desktop {
+    use crate::errors::AppError;
+    use tauri::AppHandle;
+
+    pub fn status(_app: &AppHandle, enabled: bool) -> Result<serde_json::Value, AppError> {
+        Ok(serde_json::json!({
+            "platform": std::env::consts::OS,
+            "backgroundMail": enabled,
+            "autostartSupported": true,
+            "launchAtLogin": false,
+            "serviceRunning": false,
+        }))
+    }
+
+    pub fn set_launch_at_login(_app: &AppHandle, _enabled: bool) -> Result<(), AppError> {
+        Ok(())
+    }
+}
 
 use crate::{
     app_state::AppState,

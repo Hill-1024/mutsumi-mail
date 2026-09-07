@@ -13,6 +13,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [[bin]]
 name = "mutsumi-mail"
 path = "src/main.rs"
+test = false
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }

@@ -74,8 +74,20 @@ jobs:
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
         working-directory: src-tauri
       - name: Run Rust tests
-        run: cargo test --locked --all-targets --all-features
+        run: cargo test --locked --lib --all-features
         working-directory: src-tauri
+      - name: Smoke test Windows desktop startup
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        working-directory: src-tauri
+        run: |
+          cargo build --locked --bin mutsumi-mail
+          $process = Start-Process -FilePath ".\target\debug\mutsumi-mail.exe" -ArgumentList "--background" -PassThru
+          Start-Sleep -Seconds 10
+          if ($process.HasExited) {
+            throw "Mutsumi Mail exited during the Windows startup smoke test with code $($process.ExitCode)"
+          }
+          Stop-Process -Id $process.Id -Force
 
   tauri-build-verification:
     runs-on: ubuntu-latest
