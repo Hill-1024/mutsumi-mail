@@ -10,6 +10,23 @@
 
 自动化测试使用受控协议 transcript 和本地临时数据库，不依赖 QQ/163 真实账号，也不会把 mock 结果当作公网联通证据。真实服务商、系统钥匙串和网络故障仍由桌面 smoke test 覆盖。
 
+## Android 成品 JNI 检查
+
+CI 检查生成的 Debug APK；Release 在上传前检查经过 R8 混淆的 APK 和 AAB。`scripts/verify-android-jni.py` 使用 Android SDK 的 `dexdump` 读取所有 DEX 中的 native 方法，再用 NDK 的 `llvm-nm` 对照每个 ABI 实际打包的动态库导出符号。当前应用使用按名称解析的 JNI 方法；此检查不支持通过 `RegisterNatives` 动态注册的方法。
+
+```bash
+python3 scripts/verify-android-jni.py \
+  --dexdump "$ANDROID_HOME/build-tools/36.0.0/dexdump" \
+  --nm "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-nm" \
+  path/to/app-universal-release.apk path/to/app-universal-release.aab
+```
+
+Linux 使用 `prebuilt/linux-x86_64`。缺少任意方法、DEX 或原生库都会返回非零退出码。v0.1.2 的原始 APK 可复现旧 `Keyring$Companion.initializeNdkContext` 在 arm64-v8a、armeabi-v7a 中均无对应导出的问题；切换到本地授权码存储后必须同时移除这段 Kotlin 启动调用。
+
+此检查覆盖原生方法链接，不替代安装最终 Release APK 后的冷启动、界面显示和前后台切换验证。
+
+2026-09-08 在 Android 16 / API 36 arm64 模拟器中安装 v0.1.2 原始 Release APK，复现 `MainActivity.onCreate` 的 `UnsatisfiedLinkError`。移除旧 Keyring 启动调用后，沿用原包两种 ABI 的原生库，使用临时测试签名重新执行 Release 编译、R8、APK/AAB 打包；两种成品均通过 29 个 JNI 方法的双架构检查，arm64 APK 显示零账户收件箱首页，连续 3 次冷启动及一次前后台切换后崩溃日志为空。本次验证不包含正式发行签名、armv7 运行或用户手机实测。
+
 ## 手工 smoke test
 
 真实凭据只通过本机未纳入 Git 的环境或系统密码库提供。验收顺序：添加 QQ/163 → 分别测试收件与发件 → 同步 Inbox → 打开正文 → 已读/未读 → 回复 → SMTP 发送 → 检查 Sent → 重启读取 → 再次同步不重复插入。当前环境没有真实凭据，因此此项保持未验证。

@@ -5,12 +5,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
-import io.crates.keyring.Keyring
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
-    // Initialize Android Keystore context before Tauri setup starts the mail services.
-    Keyring.initializeNdkContext(applicationContext)
+    // Credentials use LocalSecretStore; no native keyring bootstrap is needed.
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     enterImmersiveMode()

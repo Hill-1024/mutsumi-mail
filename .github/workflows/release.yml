@@ -333,7 +333,7 @@ jobs:
             -digestalg SHA-256 \
             "$aab_path" \
             "$ANDROID_KEY_ALIAS"
-      - name: Verify Android package signatures
+      - name: Verify Android package signatures and JNI entry points
         shell: bash
         run: |
           set -euo pipefail
@@ -349,6 +349,10 @@ jobs:
           aab_fingerprint="$(keytool -printcert -jarfile "$aab_path" | awk -F ': ' '/SHA256:/{ print $NF; exit }' | tr -d ':' | tr '[:lower:]' '[:upper:]')"
           test "$apk_fingerprint" = "$expected_fingerprint"
           test "$aab_fingerprint" = "$expected_fingerprint"
+          python3 scripts/verify-android-jni.py \
+            --dexdump "$ANDROID_SDK_ROOT/build-tools/36.0.0/dexdump" \
+            --nm "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
+            "$apk_path" "$aab_path"
       - uses: actions/upload-artifact@v4
         with:
           name: android-packages
@@ -391,6 +395,9 @@ jobs:
 
           if gh release view "$GITHUB_REF_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber --repo "$GH_REPO"
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GH_REPO" \
+              --notes-file "docs/releases/$GITHUB_REF_NAME.md"
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --repo "$GH_REPO" \

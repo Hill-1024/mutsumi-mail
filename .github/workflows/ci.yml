@@ -188,3 +188,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build JNI engine, services and manifest together
         run: pnpm tauri android build --ci --debug --apk --target aarch64
+      - name: Verify packaged Android JNI entry points
+        run: |
+          python3 scripts/verify-android-jni.py \
+            --dexdump "$ANDROID_SDK_ROOT/build-tools/36.0.0/dexdump" \
+            --nm "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm" \
+            src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk
