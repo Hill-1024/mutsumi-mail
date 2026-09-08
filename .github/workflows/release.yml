@@ -388,10 +388,21 @@ jobs:
           set -euo pipefail
           mapfile -d '' assets < <(find release-assets -type f -not -name SHA256SUMS.txt -print0 | sort -z)
           test "${#assets[@]}" -gt 0
+          # GitHub replaces spaces in asset filenames with dots. Stage the exact
+          # download names so the checksum list works beside the downloaded files.
+          mkdir -p release-upload
+          upload_names=()
+          upload_assets=()
           for asset in "${assets[@]}"; do
-            sha256sum "$asset"
-          done > release-assets/SHA256SUMS.txt
-          assets+=(release-assets/SHA256SUMS.txt)
+            asset_name="$(basename "$asset")"
+            asset_name="${asset_name// /.}"
+            test ! -e "release-upload/$asset_name"
+            cp "$asset" "release-upload/$asset_name"
+            upload_names+=("$asset_name")
+            upload_assets+=("release-upload/$asset_name")
+          done
+          (cd release-upload && sha256sum "${upload_names[@]}") > release-upload/SHA256SUMS.txt
+          assets=("${upload_assets[@]}" release-upload/SHA256SUMS.txt)
 
           if gh release view "$GITHUB_REF_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber --repo "$GH_REPO"
