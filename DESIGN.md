@@ -32,6 +32,7 @@
 | `surface-dim/bright`、`inverse-*` | 特殊场景 |
 | `outline` / `outline-variant` | 描边与分隔线（variant 用于非强调线） |
 | `error(-container)`、`success`、`warning` | 语义状态（success/warning 为项目自定义扩展角色） |
+| `star`、`scrim` | 项目扩展静态角色：`star` 为星标暖色强调（暗色同 warning，亮色为琥珀 `#b58a00`）；`scrim` 为对话框/抽屉遮罩基色（两端 `#000000`）。运行时 scheme 不派生，保持 CSS 静态值 |
 
 **状态层（强制）**：hover = `on-surface 8%`、focus = 12%、pressed = 12%；容器类 hover 用 `surface-container` 逐级抬升。禁止与 `#fff`/`#000` 直混。
 
@@ -84,9 +85,9 @@
   - 入场：立绘 `mutsumi-art-in`（`translate` 右侧 28px 漂移归位 + 淡入，extra-long emphasized）；文案三行 `mutsumi-copy-in` 依次 stagger（70ms 步进，上滑 10px）。
   - 常驻：立绘 `mutsumi-art-breathe`（`scale` 1→1.012，9s alternate，origin 右下）与渐变场高光 `mutsumi-glow-pan`（16s alternate 极缓平移）。动效分解在独立的 `scale`/`translate` 属性上，互不复写。
   - 离场沿用 `hero-leave`（上滑淡出），与阅读器 `reader-enter` 衔接。
-- **空状态水印**：`empty-reader` / `account-empty-state` 在睦头模式下右下角叠加 10% 透明度立绘（`mask-image` 渐隐，`aria-hidden` 装饰，纯 token 布局）。
+- **空状态水印**：`empty-reader` / `account-empty-state` 在睦头模式下右下角叠加 10% 透明度立绘（`mask-image` 渐隐，`aria-hidden` 装饰，纯 token 布局）。手机紧凑布局（宽度 ≤599px，或宽度 ≤1199px 且高度 ≤479px 的横屏）不显示该水印，避免角色残影与悬浮撰写按钮叠加；顶部角色横幅和模糊氛围背景保留。
 - **撰写按钮**：睦头模式追加 1px 发丝内描边（`primary` 34%，hover 提升至 48%），其余状态严格沿用 MD3。
-- **氛围层（借鉴 mutsumi.moe / Mizuki 语法）**：`.mutsumi-wallpaper` 固定全屏层（右下锚定立绘，`blur(28px)`+12% 透明度暗色 / 9% 亮色，`scale(1.14)` 防止模糊边缘漏出）；主要表面转半透明磨砂 —— 侧栏 82%、顶栏 66%（blur 20px）、列表 80%、阅读 72%（blur 16px）。`app-shell` 背景转透明让壁纸透出。其他主题零开销（层 `display:none`，表面保持不透明）。
+- **氛围层（借鉴 mutsumi.moe / Mizuki 语法）**：`.mutsumi-wallpaper` 固定全屏层（右下锚定立绘，`blur(28px)`+12% 透明度暗色 / 9% 亮色，`scale(1.14)` 防止模糊边缘漏出）；主要表面转半透明磨砂 —— 侧栏 82%、顶栏 66%（blur 20px）、列表 80%、阅读 72%（blur 16px）。`app-shell` 背景转透明让壁纸透出。其他主题零开销（层 `display:none`，表面保持不透明）。对话框与抽屉 scrim 同步磨砂（blur 12px），仅睦头模式生效。
 - **Hero 折叠**：邮件页内保留 hero 节点，通过 `.mutsumi-hero-region` 的 `grid-template-rows 1fr→0fr` 平滑折叠（240ms emphasized）。导航及选中项在同一次 View Transition 回调中提交；快照期间禁用高度过渡，避免捕获中间布局。
 - **路由过渡**：旧快照明确置于新快照之上，旧页 240ms 淡出、新页保持不透明，均使用 normal 合成。阅读器入场只播放一次，路由快照内不播放；结束过渡时不得重启入场动画。连续导航取消旧过渡及其过期回调，减少动态效果时直接切换。
 - **禁止**：硬编码浅色文字（旧版问题）；粉紫渐变；非 token 圆角。

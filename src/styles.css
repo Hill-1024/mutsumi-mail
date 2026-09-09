@@ -66,6 +66,10 @@
   --md-sys-color-on-success: #0f381f;
   --md-sys-color-warning: #ffdcb2;
   --md-sys-color-on-warning: #482900;
+  --md-sys-color-star: #ffdcb2;
+
+  /* Scrim role: dialog / drawer / media backdrops (static, not scheme-derived) */
+  --md-sys-color-scrim: #000000;
 
   /* ------------------------------------------------------------------------
      MD3 STATE LAYERS (on-surface derived; containers use color-mix inline)
@@ -213,6 +217,10 @@
   --md-sys-color-on-success: #ffffff;
   --md-sys-color-warning: #7c5800;
   --md-sys-color-on-warning: #ffffff;
+  /* Amber reserved for the star glyph; warning is contrast-tuned for text only. */
+  --md-sys-color-star: #b58a00;
+
+  --md-sys-color-scrim: #000000;
 
   /* Light shadows carry the warm-green tint of the background hue */
   --md-sys-elevation-1: 0px 1px 2px 0px rgb(58 66 48 / 16%), 0px 1px 3px 1px rgb(58 66 48 / 8%);
@@ -321,6 +329,8 @@ textarea:focus-visible {
    MD3 APPLICATION SHELL & NAVIGATION DRAWER
    ========================================================================== */
 .app-shell {
+  --app-safe-area-top: env(safe-area-inset-top, 0px);
+  --app-bar-height: 64px;
   display: flex;
   height: 100vh;
   height: 100dvh;
@@ -336,7 +346,7 @@ textarea:focus-visible {
   flex: 0 0 248px;
   display: flex;
   flex-direction: column;
-  padding: 12px;
+  padding: calc(12px + var(--app-safe-area-top)) 12px 12px;
   background: var(--md-sys-color-surface-container-low);
   border-right: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 55%, transparent);
   transition: width var(--md-sys-motion-duration-medium) var(--md-sys-motion-easing-emphasized);
@@ -381,6 +391,13 @@ textarea:focus-visible {
 .avatar-primary {
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary-container) 16%, transparent);
+}
+
+.account-menu-avatar {
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
 }
 
 .account-copy {
@@ -468,11 +485,6 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-secondary-container);
 }
 
-.account-menu-avatar {
-  background: var(--md-sys-color-surface-container-highest);
-  color: var(--md-sys-color-on-surface-variant);
-}
-
 .account-menu-copy {
   display: flex;
   min-width: 0;
@@ -537,7 +549,8 @@ textarea:focus-visible {
   border-radius: var(--md-sys-shape-corner-large);
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
-  box-shadow: var(--md-sys-elevation-1);
+  box-shadow: var(--md-sys-elevation-1),
+    inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary-container) 18%, transparent);
   font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.1px;
@@ -687,8 +700,8 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  min-height: 64px;
-  padding: 0 24px;
+  min-height: calc(var(--app-bar-height) + var(--app-safe-area-top));
+  padding: var(--app-safe-area-top) 24px 0;
   background: var(--md-sys-color-surface);
   border-bottom: 1px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 55%, transparent);
   z-index: 5;
@@ -732,7 +745,10 @@ textarea:focus-visible {
   font-size: 12px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
 }
 
 .sync-chip.is-offline {
@@ -774,7 +790,8 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-surface-variant);
   transition:
     background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
-    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized);
 }
 
 .icon-button:hover {
@@ -784,6 +801,7 @@ textarea:focus-visible {
 
 .icon-button:active {
   background: var(--state-layer-press);
+  transform: scale(0.94);
 }
 
 .icon-button.subtle {
@@ -918,7 +936,9 @@ textarea:focus-visible {
       color-mix(in srgb, var(--md-sys-color-primary-container) 20%, var(--md-sys-color-surface-container-low)) 62%,
       var(--md-sys-color-surface-container-low) 100%
     );
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-outline-variant) 45%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-outline-variant) 45%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary-container) 12%, transparent);
   animation: hero-enter var(--md-sys-motion-duration-long) var(--md-sys-motion-easing-emphasized);
 }
 
@@ -1050,12 +1070,14 @@ textarea:focus-visible {
 /* Mutsumi compose button carries a hairline primary ring, token-derived only. */
 [data-special-theme='mutsumi'] .compose-button {
   box-shadow: var(--md-sys-elevation-1),
-    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 34%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 34%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary-container) 18%, transparent);
 }
 
 [data-special-theme='mutsumi'] .compose-button:hover {
   box-shadow: var(--md-sys-elevation-2),
-    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 48%, transparent);
+    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-primary) 48%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary-container) 18%, transparent);
 }
 
 /* ==========================================================================
@@ -1134,6 +1156,15 @@ textarea:focus-visible {
   background: color-mix(in srgb, var(--md-sys-color-surface-container-low) 88%, transparent);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
+}
+
+/* Dialogs mount outside .app-shell, so match on :root. The frost keeps the
+   wallpaper glowing through the scrim the same way the panes do. Fixed layers
+   only — never applied to scrolling content. */
+:root[data-special-theme='mutsumi'] .modal-scrim,
+:root[data-special-theme='mutsumi'] .mobile-nav-scrim {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
 }
 
 .mutsumi-hero-art {
@@ -1423,7 +1454,8 @@ textarea:focus-visible {
   transition:
     background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
     border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
-    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized);
 }
 
 .message-select-control:hover,
@@ -1432,10 +1464,16 @@ textarea:focus-visible {
   outline: none;
 }
 
+.message-select-control:active {
+  transform: scale(0.92);
+}
+
 .message-select-control.is-checked {
   border-color: var(--md-sys-color-primary);
   background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
+  /* Same spring language as the icon pops; replays only on real toggles. */
+  animation: select-pop 320ms var(--motion-spring);
 }
 
 .message-row:hover .message-select-control:not(.is-checked),
@@ -1455,6 +1493,7 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-surface);
   font-size: 13px;
   font-weight: 600;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
 }
 
 .message-row.is-selected .row-avatar {
@@ -1558,12 +1597,16 @@ textarea:focus-visible {
   align-items: center;
   gap: 4px;
   opacity: 0;
-  transition: opacity var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  translate: 6px 0;
+  transition:
+    opacity var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    translate var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized);
 }
 
 .message-row:hover .row-actions,
 .message-row.is-selected .row-actions {
   opacity: 1;
+  translate: 0 0;
 }
 
 .row-icon {
@@ -1573,7 +1616,9 @@ textarea:focus-visible {
   height: 32px;
   border-radius: var(--md-sys-shape-corner-full);
   color: var(--md-sys-color-outline);
-  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
 }
 
 .row-icon:hover {
@@ -1581,13 +1626,9 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-surface);
 }
 
-/* Star uses the warning family for a warm, MD3-compatible accent */
+/* Star uses the dedicated warm accent role (DESIGN.md section 2) */
 .row-icon.is-starred {
-  color: var(--md-sys-color-warning);
-}
-
-:root[data-theme='light'] .row-icon.is-starred {
-  color: #b58a00;
+  color: var(--md-sys-color-star);
 }
 
 .attachment-icon {
@@ -1608,7 +1649,7 @@ textarea:focus-visible {
   width: 24px;
   height: 24px;
   margin-bottom: 12px;
-  border: 3px solid var(--md-sys-color-surface-container-highest);
+  border: 3px solid color-mix(in srgb, var(--md-sys-color-outline-variant) 45%, transparent);
   border-top-color: var(--md-sys-color-primary);
   border-radius: 50%;
   animation: m3-spin 800ms linear infinite;
@@ -1647,7 +1688,10 @@ textarea:focus-visible {
   height: 48px;
   border-radius: var(--md-sys-shape-corner-full);
   color: var(--md-sys-color-on-surface-variant);
-  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized);
 }
 
 .reader-tool:hover {
@@ -1657,14 +1701,11 @@ textarea:focus-visible {
 
 .reader-tool:active {
   background: var(--state-layer-press);
+  transform: scale(0.94);
 }
 
 .reader-tool.is-starred {
-  color: var(--md-sys-color-warning);
-}
-
-:root[data-theme='light'] .reader-tool.is-starred {
-  color: #b58a00;
+  color: var(--md-sys-color-star);
 }
 
 .reader-back {
@@ -1712,6 +1753,7 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-tertiary-container);
   font-size: 14px;
   font-weight: 700;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-tertiary-container) 16%, transparent);
 }
 
 .sender-details {
@@ -1857,6 +1899,7 @@ textarea:focus-visible {
   border-radius: var(--md-sys-shape-corner-small);
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary-container) 16%, transparent);
 }
 
 .attachment-copy {
@@ -1922,7 +1965,7 @@ textarea:focus-visible {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgb(0 0 0 / 58%);
+  background: color-mix(in srgb, var(--md-sys-color-scrim) 58%, transparent);
 }
 
 .attachment-preview {
@@ -1978,7 +2021,11 @@ textarea:focus-visible {
   color: var(--md-sys-color-primary);
   font-size: 13px;
   font-weight: 600;
-  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized);
 }
 
 .outlined-action:hover {
@@ -1988,6 +2035,7 @@ textarea:focus-visible {
 
 .outlined-action:active {
   background: color-mix(in srgb, var(--md-sys-color-primary) 14%, transparent);
+  transform: scale(0.97);
 }
 
 .empty-reader {
@@ -2010,6 +2058,11 @@ textarea:focus-visible {
   border-radius: var(--md-sys-shape-corner-full);
   background: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-primary);
+  /* Machined double bezel: tonal halo shell, hairline ring, top light. */
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--md-sys-color-surface-container-high) 55%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--md-sys-color-outline-variant) 60%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-surface) 8%, transparent);
 }
 
 .empty-reader h2 {
@@ -2117,7 +2170,10 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-surface-variant);
   font-size: 12px;
   font-weight: 500;
-  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    border-color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
 }
 
 .m3-filter-chip:hover {
@@ -2178,6 +2234,7 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-surface);
   font-size: 13px;
   font-weight: 600;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-surface) 10%, transparent);
 }
 
 .result-copy {
@@ -2203,11 +2260,7 @@ textarea:focus-visible {
 }
 
 .result-star {
-  color: var(--md-sys-color-warning);
-}
-
-:root[data-theme='light'] .result-star {
-  color: #b58a00;
+  color: var(--md-sys-color-star);
 }
 
 .result-copy span {
@@ -2276,6 +2329,7 @@ textarea:focus-visible {
   border-radius: 50%;
   background: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary-container) 16%, transparent);
 }
 
 .outbox-item-copy {
@@ -2531,7 +2585,9 @@ textarea:focus-visible {
   color: var(--md-sys-color-on-surface-variant);
   font-size: 12px;
   font-weight: 500;
-  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
 }
 
 .segmented-control button:hover {
@@ -2578,6 +2634,10 @@ textarea:focus-visible {
 .theme-palette-option.is-selected {
   border-color: var(--md-sys-color-primary);
   background: var(--md-sys-color-primary-container);
+}
+
+.theme-palette-option.is-selected .theme-palette-swatch {
+  animation: select-pop 320ms var(--motion-spring);
 }
 
 .theme-palette-option > span:last-child {
@@ -2734,7 +2794,7 @@ textarea:focus-visible {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: color-mix(in srgb, var(--md-sys-color-scrim, #000) 32%, transparent);
+  background: color-mix(in srgb, var(--md-sys-color-scrim) 32%, transparent);
   animation: scrim-fade 200ms var(--md-sys-motion-easing-standard);
 }
 
@@ -2882,7 +2942,9 @@ textarea:focus-visible {
   color: var(--md-sys-color-primary);
   font-size: 12px;
   font-weight: 600;
-  transition: all var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+  transition:
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
 }
 
 .field-action:hover {
@@ -2981,7 +3043,8 @@ textarea:focus-visible {
   box-shadow: var(--md-sys-elevation-1);
   transition:
     box-shadow var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
-    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard);
+    background var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-standard),
+    transform var(--md-sys-motion-duration-short) var(--md-sys-motion-easing-emphasized);
 }
 
 .send-action:hover,
@@ -2994,6 +3057,7 @@ textarea:focus-visible {
 .primary-action:active {
   box-shadow: var(--md-sys-elevation-1);
   background: color-mix(in srgb, var(--md-sys-color-primary) 88%, var(--md-sys-color-on-primary) 12%);
+  transform: scale(0.98);
 }
 
 .text-action {
@@ -3201,6 +3265,7 @@ textarea:focus-visible {
   background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
   font-weight: 700;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--md-sys-color-on-primary) 24%, transparent);
 }
 
 .provider-detected > div:nth-child(2) {
@@ -3321,7 +3386,7 @@ textarea:focus-visible {
     width: 80px;
     flex-basis: 80px;
     align-items: center;
-    padding: 12px 8px;
+    padding: calc(var(--app-safe-area-top) + (var(--app-bar-height) - 48px) / 2) 8px 12px;
   }
   .sidebar .account-switcher {
     order: 3;
@@ -3427,7 +3492,7 @@ textarea:focus-visible {
     z-index: 80;
     inset: 0;
     display: block;
-    background: rgba(0, 0, 0, 0.55);
+    background: color-mix(in srgb, var(--md-sys-color-scrim) 55%, transparent);
     animation: scrim-fade 200ms var(--md-sys-motion-easing-standard);
   }
   .mobile-nav-scrim.is-exiting {
@@ -3440,7 +3505,7 @@ textarea:focus-visible {
     width: min(320px, calc(100vw - 56px));
     height: 100%;
     flex-direction: column;
-    padding: 12px;
+    padding: var(--app-safe-area-top) 12px 12px;
     overflow-y: auto;
     border-radius: 0 var(--md-sys-shape-corner-large) var(--md-sys-shape-corner-large) 0;
     background: var(--md-sys-color-surface-container-low);
@@ -3458,6 +3523,8 @@ textarea:focus-visible {
     margin-bottom: 8px;
   }
   .mobile-drawer-header .account-switcher {
+    /* Keep the account row level with the workspace app bar, including cutouts. */
+    min-height: var(--app-bar-height);
     min-width: 0;
     flex: 1;
     margin: 0;
@@ -3473,6 +3540,8 @@ textarea:focus-visible {
   }
   .mobile-drawer-header > .icon-button {
     align-self: flex-start;
+    /* Account-menu expansion must not move the close button out of the top row. */
+    margin-top: calc((var(--app-bar-height) - 48px) / 2);
   }
   .mobile-folder-list {
     display: flex;
@@ -3542,6 +3611,11 @@ textarea:focus-visible {
   .sidebar {
     display: none;
   }
+  /* Keep the compact compose area clear of the empty-state character watermark. */
+  [data-special-theme='mutsumi'] .empty-reader::after,
+  [data-special-theme='mutsumi'] .account-empty-state::after {
+    content: none;
+  }
   .mutsumi-hero {
     min-height: 200px;
     margin: 8px 8px 4px;
@@ -3571,10 +3645,7 @@ textarea:focus-visible {
     padding-bottom: 0;
   }
   .topbar {
-    min-height: 64px;
-    /* Normally zero in immersive mode; prevents overlap while a device or
-       WebView temporarily exposes a display-cutout/status-bar inset. */
-    padding: env(safe-area-inset-top) 12px 0;
+    padding: var(--app-safe-area-top) 12px 0;
   }
   .mobile-menu-trigger {
     display: inline-grid;
@@ -3630,6 +3701,7 @@ textarea:focus-visible {
   .row-actions {
     display: flex;
     opacity: 1;
+    translate: none;
   }
   .row-read-toggle,
   .search-shortcut {
@@ -3926,6 +3998,19 @@ iframe.reader-html-body {
   }
   100% {
     opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* State-change pop for solid containers (select checkbox, palette swatch). */
+@keyframes select-pop {
+  0% {
+    transform: scale(0.8);
+  }
+  60% {
+    transform: scale(1.08);
+  }
+  100% {
     transform: scale(1);
   }
 }
