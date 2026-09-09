@@ -178,7 +178,6 @@ export function AppShell({
   const navigate = useAppNavigation();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const dynamicColorRequested = useRef(false);
   const [accountMenuSurface, setAccountMenuSurface] = useState<'desktop' | 'mobile' | null>(null);
 
   useEffect(() => installContextMenuGuard(), []);
@@ -360,12 +359,28 @@ export function AppShell({
   }, [androidDynamicColor, androidDynamicSeed, customThemeSeed, mutsumiMode, themeMode, themePalette]);
 
   useEffect(() => {
-    if (!androidDynamicColor || androidDynamicSeed || dynamicColorRequested.current) return;
-    dynamicColorRequested.current = true;
-    void getAndroidDynamicColor()
-      .then((result) => setAndroidDynamicSeed(result.available ? (result.seedHex ?? null) : null))
-      .catch(() => setAndroidDynamicSeed(null));
-  }, [androidDynamicColor, androidDynamicSeed, setAndroidDynamicSeed]);
+    if (!androidDynamicColor) return;
+    let cancelled = false;
+    let pending = false;
+    const refreshDynamicColor = () => {
+      if (pending) return;
+      pending = true;
+      void getAndroidDynamicColor()
+        .then((result) => {
+          if (!cancelled) setAndroidDynamicSeed(result.available ? (result.seedHex ?? null) : null);
+        })
+        // Keep the last usable palette after a transient failure. Returning to
+        // the app retries the read and also picks up a changed system wallpaper.
+        .catch(() => undefined)
+        .finally(() => { pending = false; });
+    };
+    refreshDynamicColor();
+    window.addEventListener('focus', refreshDynamicColor);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', refreshDynamicColor);
+    };
+  }, [androidDynamicColor, setAndroidDynamicSeed]);
 
   useEffect(() => {
     if (!accountMenuSurface) return undefined;

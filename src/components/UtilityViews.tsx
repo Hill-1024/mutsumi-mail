@@ -380,9 +380,10 @@ export function SettingsView({
   const [permissionFeedback, setPermissionFeedback] = useState('');
   const [allFilesAccess, setAllFilesAccess] = useState<AllFilesAccess | 'checking'>('checking');
   const isAndroid = isTauriRuntime && /android/i.test(navigator.userAgent);
-  const [dynamicColorAvailable, setDynamicColorAvailable] = useState<boolean | 'checking'>(
+  const [dynamicColorAvailable, setDynamicColorAvailable] = useState<boolean | 'checking' | 'error'>(
     isAndroid ? 'checking' : false,
   );
+  const [dynamicColorAttempt, setDynamicColorAttempt] = useState(0);
 
   useEffect(() => {
     setNavPage('settings');
@@ -416,16 +417,18 @@ export function SettingsView({
 
   useEffect(() => {
     if (!isAndroid) return;
+    let cancelled = false;
     void getAndroidDynamicColor()
       .then((result) => {
+        if (cancelled) return;
         setDynamicColorAvailable(result.available);
         setAndroidDynamicSeed(result.available && result.seedHex ? result.seedHex : null);
       })
       .catch(() => {
-        setDynamicColorAvailable(false);
-        setAndroidDynamicSeed(null);
+        if (!cancelled) setDynamicColorAvailable('error');
       });
-  }, [isAndroid, setAndroidDynamicSeed]);
+    return () => { cancelled = true; };
+  }, [isAndroid, dynamicColorAttempt, setAndroidDynamicSeed]);
 
   useEffect(() => {
     const refreshAllFilesAccess = () => {
@@ -463,7 +466,7 @@ export function SettingsView({
   };
 
   const toggleAndroidDynamicColor = () => {
-    if (dynamicColorAvailable !== true) return;
+    if (!androidDynamicColor && dynamicColorAvailable !== true) return;
     const enabled = !androidDynamicColor;
     setAndroidDynamicColor(enabled);
     void updateSettings({ androidDynamicColor: enabled }).catch(() =>
@@ -757,20 +760,36 @@ export function SettingsView({
             <div className="setting-row">
               <div>
                 <strong>系统动态配色</strong>
-                <span>
+                <span id="dynamic-color-status" aria-live="polite">
                   {dynamicColorAvailable === 'checking'
                     ? '正在检查系统动态色支持…'
-                    : dynamicColorAvailable
-                      ? '使用 Android 12+ 从壁纸提取的 Monet 配色。'
-                      : '此设备不支持 Android 12 动态配色，将使用上方方案。'}
+                    : dynamicColorAvailable === 'error'
+                      ? '暂时无法读取系统配色，请重试。'
+                      : dynamicColorAvailable
+                        ? '使用 Android 12+ 从壁纸提取的 Monet 配色。'
+                        : '此设备不支持 Android 12 动态配色，将使用上方方案。'}
                 </span>
+                {dynamicColorAvailable === 'error' && (
+                  <button
+                    type="button"
+                    className="text-action"
+                    onClick={() => {
+                      setDynamicColorAvailable('checking');
+                      setDynamicColorAttempt((attempt) => attempt + 1);
+                    }}
+                  >
+                    重新读取
+                  </button>
+                )}
               </div>
               <button
                 type="button"
                 role="switch"
-                aria-checked={androidDynamicColor && dynamicColorAvailable === true}
-                disabled={dynamicColorAvailable !== true}
-                className={`m3-switch ${androidDynamicColor && dynamicColorAvailable === true ? 'is-on' : ''}`}
+                aria-label="系统动态配色"
+                aria-describedby="dynamic-color-status"
+                aria-checked={androidDynamicColor}
+                disabled={!androidDynamicColor && dynamicColorAvailable !== true}
+                className={`m3-switch ${androidDynamicColor ? 'is-on' : ''}`}
                 onClick={toggleAndroidDynamicColor}
                 title={androidDynamicColor ? '已开启系统动态配色' : '已关闭系统动态配色'}
               >

@@ -107,5 +107,9 @@ export interface AndroidDynamicColorResult {
 
 export async function getAndroidDynamicColor(): Promise<AndroidDynamicColorResult> {
   if (!isTauriRuntime || !/android/i.test(navigator.userAgent)) return { available: false };
-  return invoke<AndroidDynamicColorResult>('plugin:dynamic-color|palette');
+  const result = await invoke<AndroidDynamicColorResult>('plugin:dynamic-color|palette');
+  if (result.available && !/^#[0-9a-f]{6}$/i.test(result.seedHex ?? '')) {
+    throw new Error('系统动态配色未返回有效颜色');
+  }
+  return result;
 }

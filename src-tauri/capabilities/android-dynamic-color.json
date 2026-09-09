@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/android-schema.json",
+  "identifier": "android-dynamic-color",
+  "description": "Read the Android system color palette from the main window",
+  "platforms": ["android"],
+  "windows": ["main"],
+  "permissions": ["dynamic-color:allow-palette"]
+}
